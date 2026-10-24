@@ -379,15 +379,13 @@ FRAME = ("This is one frame from a small robot dog's fisheye camera, about 20 cm
          "at the bottom of the circle, and things at the left and right edges are beside the robot, not ahead.")
 
 
-def small_jpeg(jpeg: bytes, side: int = 512, quality: int = 75) -> bytes:
+def small_jpeg(jpeg: bytes, side: int = 512, quality: int = 60) -> bytes:
     """The frame at most ``side`` px wide or high: the Pupper's WiFi sends slowly, and Gemma answers
     "is there a backpack" or draws a box as well from 512 px."""
     from PIL import Image
 
     im = Image.open(io.BytesIO(jpeg))
-    if max(im.size) <= side:
-        return jpeg
-    im.thumbnail((side, side))
+    im.thumbnail((side, side))  # (a smaller frame is only re-encoded, at the lower quality)
     buf = io.BytesIO()
     im.convert("RGB").save(buf, "JPEG", quality=quality)
     return buf.getvalue()
@@ -599,6 +597,9 @@ class Eyes:
         self.state = "full"  # full | idle | standby, for /health
         self.detections: list[dict] = []  # the detector's latest boxes, in full-frame fractions
         self.detector_hit = 0.0  # when the detector last had a box for the wanted thing (else Gemma takes over)
+        # What /exists (find's look) last said yes to, and when: go_to straight after needn't ask again.
+        # Over the Pupper's slow WiFi each Gemma question costs seconds.
+        self.seen_by_gemma: tuple[str, float] = ("", 0.0)
         self.hz, self.describe_every, self.advertise, self.hfov_deg, self.wb = hz, describe_every, advertise, hfov_deg, wb
         self.latest: bytes | None = None  # the latest JPEG
         self.latest_time = 0.0
@@ -771,7 +772,9 @@ class Eyes:
             if wanted:
                 if confirmed != wanted:  # a new target: first ask whether it is there at all
                     previous = None
-                    if not self.gemma.exists(jpeg, wanted):
+                    if self.seen_by_gemma[0] == wanted and time.time() - self.seen_by_gemma[1] < 30:
+                        confirmed = wanted  # find just saw it: straight to where it is
+                    elif not self.gemma.exists(jpeg, wanted):
                         self.robot.post_target(wanted, None, 0.0)
                         log.info("target %r: not in the frame (%.0f ms)", wanted, (time.time() - t0) * 1000)
                         self.stats["gemma_ms"] = (time.time() - t0) * 1000
@@ -821,6 +824,8 @@ class Eyes:
         buf = io.BytesIO()
         crop.save(buf, "JPEG", quality=85)
         found = self.gemma.exists(buf.getvalue(), name)
+        if found:
+            self.seen_by_gemma = (name, time.time())
         return {"found": found, "source": "gemma", "frame_age_s": round(age, 1), "ms": round((time.time() - t0) * 1000)}
 
     # ---- /look

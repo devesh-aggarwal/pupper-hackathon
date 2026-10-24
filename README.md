@@ -133,7 +133,7 @@ laptop), then restart.
 **With Gemini Live:** on the Pupper, on the ground, with clear space around it, one command:
 
 ```bash
-./run_pupper.sh           # kiosk on Pupper's screen, volume 30
+./run_pupper.sh           # kiosk on Pupper's screen, volume 100
 ./run_pupper.sh 50        # speaker volume 0-100
 ./run_pupper.sh --laptop  # no kiosk: open the app from your laptop through the SSH tunnel
 ```

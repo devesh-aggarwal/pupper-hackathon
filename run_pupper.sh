@@ -21,7 +21,7 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 [ "$(uname)" = Darwin ] && exec "$HERE/tools/brain_on_mac.sh" "$@"  # on the Mac: the local brain
-VOLUME=30; KIOSK=1
+VOLUME=100; KIOSK=1  # Pupper's voice (Piper) needs it: at 30% it was hard to hear across a room
 for arg in "$@"; do
   case "$arg" in
     --laptop|--no-kiosk) KIOSK=0 ;;

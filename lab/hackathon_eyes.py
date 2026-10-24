@@ -57,9 +57,12 @@ ARRIVE_TICKS = 8  # ... for this many ticks in a row (0.4 s, two depth frames): 
 SLOW_M = 0.9  # from here on, half speed (a bottom-unknown target, ranged by the depth strip in metres)
 # Gemma takes 2-3 s per fix, and the eyes service wants two fixes that agree before it posts the first
 # box, so the first box takes 5-8 s and then one comes every 2-3 s.
-SEE_S = 10.0  # how long to stand and wait for the eyes to find the thing at all
-LOST_S = 6.0  # how long to keep going on the last box before giving up
-TARGET_FRESH_S = 4.0  # a box older than this is not steered on
+# Over the Pupper's slow WiFi, a Gemma sighting takes several seconds, and the robot steers only once
+# two agree: 10 s to see, 4 s fresh and 6 s lost gave up just before the box came (a pink can,
+# found by find, then "can't see it (waited 10 s)" 3 s before the eyes posted its box).
+SEE_S = 30.0  # how long to stand and wait for the eyes to find the thing at all
+LOST_S = 12.0  # how long to keep going on the last box before giving up
+TARGET_FRESH_S = 8.0  # a box older than this is not steered on
 SCENE_FRESH_S = 90.0
 EYES_TIMEOUT_S = 25.0
 
@@ -210,7 +213,9 @@ async def go_to(robot: Robot, what: str) -> Result:
             WANTED.update(name="", since=0.0)
             return res
         start = robot.now()
-        deadline = start + max_s
+        # One move's time (max_s) counts from the first sighting: standing still while the eyes look
+        # (up to SEE_S) is not moving, and over the Pupper's slow WiFi it can take a while.
+        deadline = start + SEE_S + max_s
         walked = 0.0
         last_box: list | None = None
         last_seen: float | None = None
@@ -229,6 +234,8 @@ async def go_to(robot: Robot, what: str) -> Result:
                 return Result(False, FELL_MESSAGE)
             hit = target_box(name)
             if hit:
+                if last_seen is None:
+                    deadline = robot.now() + max_s
                 last_box, source, bottom_known = hit
                 last_seen = robot.now()
                 taken = TARGET["time"] if source != "detector" else vision.VISION["time"]

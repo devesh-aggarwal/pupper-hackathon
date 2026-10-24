@@ -634,8 +634,8 @@ class Speaker:
             self.on_change()
             try:
                 self._speak(text)
-            except (OSError, subprocess.CalledProcessError) as e:
-                print(f"  (speech failed: {e})")
+            except Exception as e:  # one bad sentence must not silence Pupper for the rest of the session
+                print(f"  !! speech failed ({type(e).__name__}: {e}): {text[:60]!r}", flush=True)
             finally:
                 if self.q.empty():
                     self.quiet_until = time.time() + 0.4  # the room's echo of the last word
