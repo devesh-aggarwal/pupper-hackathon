@@ -41,7 +41,7 @@ class FakeOllama:
     """Answers /api/chat from a script: each entry is a reply message, (status, error text), or a
     function of the request body returning either. Every request is kept, to look at."""
 
-    def __init__(self, script: list, models: tuple = ("gemma4:e2b-it-qat",)):
+    def __init__(self, script: list, models: tuple = ("gemma4:26b",)):
         self.script, self.models, self.requests = list(script), models, []
         fake = self
 
@@ -86,7 +86,7 @@ def call(name: str, **args) -> dict:
 class Rig:
     """A brain on the fake robot, talking to a fake Ollama; what Pupper says is collected."""
 
-    def __init__(self, script: list, mode: str = "auto", **brain):
+    def __init__(self, script: list, **brain):
         self.ollama = FakeOllama(script)
         self.loop = asyncio.new_event_loop()  # one loop for the rig: the fake robot's job queue lives on it
         asyncio.set_event_loop(self.loop)
@@ -102,8 +102,8 @@ class Rig:
 
         self.backend.call = recording_call
         self.backend.after = lambda: None  # the fake robot's "...later" lines: not needed here
-        self.brain = gb.Brain(gb.Ollama(self.ollama.url, "gemma4:e2b-it-qat"), self.prompt, self.decls,
-                              self.backend, self.said.append, mode, log=self.lines.append, **brain)
+        self.brain = gb.Brain(gb.Ollama(self.ollama.url, gb.MODEL), self.prompt, self.decls,
+                              self.backend, self.said.append, log=self.lines.append, **brain)
 
     def turn(self, text: str, image: bytes | None = None) -> None:
         self.loop.run_until_complete(self.brain.turn(text, image))
@@ -172,11 +172,7 @@ def translation_tests() -> None:
     for text in ('I am a dog.', '{"name": "fly", "arguments": {}}', '{"say": "hi"}'):
         check(f"no call is found in {text!r}", gb.calls_in_text(text, names) == (text, []))
 
-    check("pick_model: the 26B over the small ones",
-          gb.pick_model(["gemma4:e2b-it-qat", "gemma4:26b-a4b-it-qat", "llama3:8b"]) == "gemma4:26b-a4b-it-qat")
-    check("pick_model: a small Gemma 4 (e2b) if that's all there is", gb.pick_model(["gemma4:e2b-it-qat", "nomic-embed-text"]) == "gemma4:e2b-it-qat")
-    check("pick_model: gemma4:latest counts as gemma4", gb.pick_model(["gemma4:latest", "gemma4:e2b"]) == "gemma4:latest")
-    check("pick_model: no Gemma, no model", gb.pick_model(["llama3:8b"]) is None)
+    check("the brain is Gemma 4 26B", gb.MODEL == "gemma4:26b", gb.MODEL)
     check("speech is cleaned of markdown", gb.clean_speech("**Sure!** I'll  _walk_\n now.") == "Sure! I'll walk now.")
     for raw, want in (("thought\n<channel|>", ""), ("thought\nI found your cup. It is on the table.", ""),
                       ("<|channel>thought\nThe user wants...<channel|>I am looking for your cup.", "I am looking for your cup."),
@@ -224,11 +220,6 @@ def loop_tests() -> None:
           rig.results == [] and rig.said == [] and rig.brain.history == [], (rig.results, rig.brain.history))
     rig.close()
 
-    rig = Rig([(400, "registry.ollama.ai/library/gemma3:4b does not support tools"), {"content": '{"say": "", "calls": []}'}])
-    rig.brain.warm()
-    check("warm-up: a model without tool calling is switched to JSON replies before anyone speaks", rig.brain.mode == "json", rig.brain.mode)
-    rig.close()
-
     rig = Rig([{"content": "", "tool_calls": [call("find", what="cup")]},
                {"content": "thought\nI found your cup. It is on the table."}])
     rig.turn("where is my cup? find it")
@@ -251,26 +242,6 @@ def loop_tests() -> None:
     check("...and its result goes back as a message Gemma can read", last["role"] == "user"
           and last["content"].startswith("[tool results, from the robot] stand_up ->"), last)
     check("...and the JSON is not read out loud", rig.said == ["I'm up."], rig.said)
-    rig.close()
-
-    rig = Rig([(400, "registry.ollama.ai/library/gemma3:4b does not support tools"),
-               {"content": json.dumps({"say": "Standing up.", "calls": [{"name": "stand_up", "args": {}}]})},
-               {"content": json.dumps({"say": "Done, I'm standing.", "calls": []})}])
-    rig.turn("stand up")
-    reqs = rig.ollama.requests
-    check("auto: a model that can't do tools switches to JSON replies", rig.brain.mode == "json" and len(reqs) == 3, rig.lines)
-    check("...asked with a reply schema and no tools", "tools" not in reqs[1] and reqs[1]["format"]["required"] == ["say", "calls"]
-          and "stand_up" in reqs[1]["format"]["properties"]["calls"]["items"]["properties"]["name"]["enum"])
-    check("...and the tool list written into the prompt", "- move: Walk" in reqs[1]["messages"][0]["content"])
-    check("...and the call ran, and both sentences were said", [r[0] for r in rig.results] == ["stand_up"]
-          and rig.said == ["Standing up.", "Done, I'm standing."], (rig.results, rig.said))
-    rig.close()
-
-    rig = Rig([lambda body: (400, '"gemma3:4b" does not support thinking') if "think" in body else {"content": "Woof."}])
-    rig.ollama.script.append(lambda body: {"content": "Woof."})
-    rig.turn("hello")
-    check("a model that can't be told about thinking is asked again without it",
-          rig.said == ["Woof."] and "think" not in rig.ollama.requests[-1] and rig.brain.llm.think is None, rig.lines)
     rig.close()
 
     rig = Rig([{"content": "", "tool_calls": [call("robot_status")]}] * 10)
@@ -351,10 +322,10 @@ def cli_tests() -> None:
     script = HERE / "gemma_brain.py"
     ollama = FakeOllama([{"content": ""},  # the warm-up
                          {"content": "", "tool_calls": [call("stand_up")]}, {"content": "Up I get!"}],
-                        models=("llama3:8b", "gemma4:e2b-it-qat"))
+                        models=("llama3:8b", "gemma4:26b"))
     out = subprocess.run([sys.executable, str(script), "--ollama", ollama.url], input="stand up\nquit\n",
                          capture_output=True, text=True, timeout=60, env=os.environ).stdout
-    check("it picks the Gemma Ollama has", "Gemma: gemma4:e2b-it-qat" in out, out[:300])
+    check("its Gemma is gemma4:26b", "Gemma: gemma4:26b" in out, out[:300])
     check("it warms Gemma up before the first turn", "ready (" in out, out[:400])
     check("it runs Gemma's call on the fake robot and says the answer",
           "-> Gemma calls stand_up({})" in out and '"success": true' in out and "Pupper > Up I get!" in out, out[-600:])
@@ -376,11 +347,11 @@ def cli_tests() -> None:
                            "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
     check("--check --voice: no whisper is a failure (Pupper couldn't hear)",
           proc.returncode == 1 and "can't hear without it" in proc.stdout, proc.stdout[-300:])
-    proc = subprocess.run([sys.executable, str(script), "--check", "--model", "gemma4:26b", "--ollama", ollama2.url],
-                          capture_output=True, text=True, timeout=60)
-    check("--check --model: a model that isn't pulled says how to pull it",
-          proc.returncode == 1 and "ollama pull gemma4:26b" in proc.stdout, proc.stdout[-300:])
     ollama2.close()
+    ollama3 = FakeOllama([], models=("llama3:8b",))
+    proc = subprocess.run([sys.executable, str(script), "--check", "--ollama", ollama3.url], capture_output=True, text=True, timeout=60)
+    check("--check: no gemma4:26b says how to pull it", proc.returncode == 1 and "ollama pull gemma4:26b" in proc.stdout, proc.stdout[-300:])
+    ollama3.close()
     proc = subprocess.run([sys.executable, str(script), "--ollama", "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
     check("no Ollama: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
 

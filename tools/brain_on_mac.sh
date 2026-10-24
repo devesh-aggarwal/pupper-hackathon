@@ -13,8 +13,7 @@
 #
 # Ctrl+C stops the robot. The servers and the link keep running, so ./run_pupper.sh on the Pupper
 # itself works too, until the Mac sleeps or restarts.   tools/brain_on_mac.sh stop   ends them.
-# Gemma is gemma4:26b once it is pulled (ollama pull gemma4:26b, about 17 GB, once); until then the
-# best Gemma this Mac already has. The first run also downloads whisper's model (about 550 MB).
+# Gemma is gemma4:26b (pulled the first time if it isn't here: about 17 GB). The first run also downloads whisper's model (about 550 MB).
 # While the link is up, http://localhost:8000 on this Mac is Pupper's app (its face and debug view).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -68,14 +67,8 @@ if ! ollama_up; then
   nohup caffeinate -i -w "$(cat "$CACHE/ollama.pid")" >/dev/null 2>&1 &  # no sleeping while it's the brain
 fi
 if ! ollama show "$WANT" >/dev/null 2>&1; then
-  HAVE=$(cd "$HERE" && python3 -c 'import sys; sys.path.insert(0, "robot"); import gemma_brain as g; print(g.pick_model(sys.argv[1:]) or "")' \
-         $(ollama list 2>/dev/null | awk 'NR > 1 {print $1}'))
-  if [ -n "$HAVE" ]; then
-    echo "Gemma: $WANT isn't pulled yet, so $HAVE for now (the better brain: ollama pull $WANT, about 17 GB)"
-  else
-    echo "pulling $WANT (once, about 17 GB)..."
-    ollama pull "$WANT" || die "couldn't pull $WANT. Gemma 4 needs a recent Ollama: brew upgrade ollama, or update the app"
-  fi
+  echo "pulling $WANT (once, about 17 GB)..."
+  ollama pull "$WANT" || die "couldn't pull $WANT. Gemma 4 needs a recent Ollama: brew upgrade ollama, or update the app"
 fi
 
 whisper_up() { curl -sf -m 2 -o /dev/null "http://127.0.0.1:$WHISPER_PORT/"; }
@@ -134,7 +127,7 @@ fi
 if ! alive eyes; then
   nohup bash -c "cd '$HERE' && while true; do
       '$VENV/bin/python' -u vision/eyes.py --robot http://localhost:8000 --ollama http://127.0.0.1:$OLLAMA_PORT \
-        --gemma '$(ollama show "$WANT" >/dev/null 2>&1 && echo "$WANT" || echo "${HAVE:-$WANT}")' --hz 5 --always \
+        --gemma '$WANT' --hz 5 --always \
         --port $EYES_PORT --advertise http://127.0.0.1:$EYES_PORT --source mac --describe-every 120 \
         --fetch-depth-model --fetch-detector-model
       sleep 5

@@ -25,7 +25,7 @@ while another eyes service (a laptop's, the Jetson's) is posting, so the Pi stay
      is in the frame right now: the detector's word for a thing with a class, else Gemma's yes or no
      (the robot's explore tool asks at every stop).
 
-Gemma runs in Ollama (https://ollama.com): ``ollama pull gemma3:4b`` (a vision model; on-device, no
+Gemma runs in Ollama (https://ollama.com): ``ollama pull gemma4:26b`` (a vision model; on-device, no
 cloud), or, until the Jetson is here, through Google's API with the Gemini key (``--gemma-api``:
 gemini-3.5-flash-lite by default, cloud, so not for the final hackathon build). Depth needs the ONNX file (see
 fetch_depth_model() or --depth-model). Without the depth model this still does 3-5; without Gemma it
@@ -42,6 +42,7 @@ import io
 import json
 import logging
 import os
+import queue
 import socket
 import sys
 import threading
@@ -382,26 +383,17 @@ class Gemma:
     def __init__(self, url: str, model: str, timeout: float = 60.0):
         self.url, self.model, self.timeout = url.rstrip("/"), model, timeout
 
-    think: bool | None = False  # Gemma 4 thinks unless told not to: its few tokens went to thinking, and
-    # exists() got "" (no) for everything in view. None: a model that can't be told (Ollama says so).
-
     def ask(self, image_jpeg: bytes, prompt: str, json_mode: bool = False, max_tokens: int = 120) -> str:
+        # think: False. Gemma 4 thinks unless told not to, its few tokens went to thinking, and
+        # exists() got "" (no) for everything in view.
         body = {"model": self.model, "prompt": prompt, "images": [base64.b64encode(image_jpeg).decode()],
-                "stream": False, "options": {"temperature": 0.1, "num_predict": max_tokens}}
-        if self.think is not None:
-            body["think"] = self.think
+                "stream": False, "think": False, "options": {"temperature": 0.1, "num_predict": max_tokens}}
         if json_mode:
             body["format"] = "json"
         req = urllib.request.Request(self.url + "/api/generate", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return json.loads(r.read().decode()).get("response", "").strip()
-        except urllib.error.HTTPError as e:
-            if self.think is not None and "think" in e.read().decode(errors="replace").lower():
-                self.think = None
-                return self.ask(image_jpeg, prompt, json_mode, max_tokens)
-            raise
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return json.loads(r.read().decode()).get("response", "").strip()
 
     def exists(self, image_jpeg: bytes, name: str) -> bool:
         """Is ``name`` clearly in the frame? Asked before locate(): asked for a box, a small model draws
@@ -603,6 +595,69 @@ class Eyes:
         self.mask = circle_mask(depth.size if depth else DEPTH_INPUT)
         self.cam_height_m = CAM_HEIGHT_STANDING_M  # the robot says which (standing or lying) with each reply
         self.stats = {"frames": 0, "depth_ms": 0.0, "gemma_ms": 0.0}
+        # Over a slow link (ngrok), a frame and two posts in a row took ~750 ms a cycle; the depth model
+        # takes ~40 ms. So frames come in while the last is processed (_fetch_frames), and posts go out
+        # without waiting (_send), newest first: the loop runs at the rate frames arrive.
+        self._frame: tuple[bytes | None, float] = (None, 0.0)
+        self._frame_cv = threading.Condition()
+        self._want_frames_until = 0.0  # the fetcher runs only while the loop asks (not while standing down)
+        self._outbox: dict[str, "queue.Queue"] = {}
+        self._helpers_started = False
+
+    def _start_helpers(self) -> None:
+        if self._helpers_started or not self.robot:
+            return
+        self._helpers_started = True
+        threading.Thread(target=self._fetch_frames, daemon=True).start()
+        for kind in ("detections", "freespace"):  # one sender each: a slow post of one doesn't hold up the other
+            self._outbox[kind] = queue.Queue(maxsize=1)
+            threading.Thread(target=self._send, args=(kind,), daemon=True).start()
+
+    def _fetch_frames(self) -> None:
+        while True:
+            if time.time() > self._want_frames_until:
+                time.sleep(0.05)
+                continue
+            jpeg = self.robot.frame()
+            if not jpeg:
+                time.sleep(0.2)
+                continue
+            with self._frame_cv:
+                self._frame = (jpeg, time.time())
+                self._frame_cv.notify_all()
+
+    def _newest_frame(self, after: float, wait_s: float = 1.0) -> tuple[bytes | None, float]:
+        """The newest frame fetched after ``after`` (waiting up to wait_s for one), and when it came."""
+        self._want_frames_until = time.time() + 1.0
+        with self._frame_cv:
+            self._frame_cv.wait_for(lambda: self._frame[1] > after, timeout=wait_s)
+            return self._frame if self._frame[1] > after else (None, 0.0)
+
+    def _post_later(self, kind: str, send) -> None:
+        """Queue a post, replacing one of the same kind that hasn't gone yet (only the newest matters)."""
+        box = self._outbox[kind]
+        try:
+            box.get_nowait()
+        except queue.Empty:
+            pass
+        box.put_nowait(send)
+
+    def _send(self, kind: str) -> None:
+        while True:
+            send = self._outbox[kind].get()
+            try:
+                send()
+            except Exception as e:  # a failed post must not stop the next one
+                log.warning("posting %s failed: %s", kind, e)
+
+    def _post_freespace(self, summary: list[dict], frame_time: float) -> None:
+        reply = self.robot.post_freespace(summary, "metric", self.advertise if self.gemma else "", self.circle,
+                                          frame_age_s=time.time() - frame_time, source=self.source)
+        self.wanted = reply.get("wanted") or None
+        try:
+            self.cam_height_m = float(reply.get("cam_height_m") or self.cam_height_m)
+        except (TypeError, ValueError):
+            pass
 
     def crop(self, jpeg: bytes):
         """The latest frame cropped to its disc: (PIL image, crop geometry, full size)."""
@@ -638,8 +693,10 @@ class Eyes:
                 next_frame = t0 + period
             else:
                 next_frame = t0 + 1.0 / self.hz
-            jpeg = self.robot.frame() if self.robot else None
+            self._start_helpers()
+            jpeg, frame_time = self._newest_frame(self.latest_time) if self.robot else (None, 0.0)
             if jpeg:
+                t0 = frame_time
                 with self.lock:
                     self.latest, self.latest_time = jpeg, t0
                 self.stats["frames"] += 1
@@ -650,7 +707,7 @@ class Eyes:
                         for d in dets:
                             d["box"] = box_to_frame(d["box"], geom, size)
                         self.detections = dets
-                        self.robot.post_detections(dets, size)
+                        self._post_later("detections", lambda dets=dets, size=size: self.robot.post_detections(dets, size))
                         label = Detector.wanted_label(self.wanted) if self.wanted else None
                         if label:  # the wanted thing has a class: the detector's box, every frame, nearest first
                             hits = [d for d in dets if Detector.matches(d["label"], label)]
@@ -669,13 +726,7 @@ class Eyes:
                         mask = self.mask if self.circle[2] < 0.5 else None
                         self.summary = freespace_from_closeness(closeness, metric, self.hfov_deg, mask, self.cam_height_m, geom, size)
                         self.stats["depth_ms"] = (time.time() - t0) * 1000
-                        reply = self.robot.post_freespace(self.summary, "metric", self.advertise if self.gemma else "", self.circle,
-                                                          frame_age_s=time.time() - t0, source=self.source)
-                        self.wanted = reply.get("wanted") or None
-                        try:
-                            self.cam_height_m = float(reply.get("cam_height_m") or self.cam_height_m)
-                        except (TypeError, ValueError):
-                            pass
+                        self._post_later("freespace", lambda summary=self.summary, ft=frame_time: self._post_freespace(summary, ft))
                     except Exception as e:  # a bad frame must not kill the eyes
                         log.warning("depth failed: %s", e)
                 else:
@@ -861,7 +912,7 @@ def main() -> None:
     ap.add_argument("--fetch-detector-model", action="store_true", help="download the COCO detector model if it is missing (about 4 MB)")
     ap.add_argument("--no-detector", action="store_true")
     ap.add_argument("--ollama", default="http://localhost:11434")
-    ap.add_argument("--gemma", default="gemma3:4b", help="the Ollama vision model (gemma3:4b, gemma3:12b, gemma3n:e4b)")
+    ap.add_argument("--gemma", default="gemma4:26b", help="the Ollama vision model (gemma4:26b)")
     ap.add_argument("--no-gemma", action="store_true")
     ap.add_argument("--gemma-api", action="store_true", help="the eyes' model through Google's API (cloud) instead of a local Gemma")
     ap.add_argument("--gemma-api-model", default="gemini-3.5-flash-lite",

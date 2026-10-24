@@ -3,7 +3,7 @@
 prompt and tools (robot/gemma_brain.py), on the fake robot (nothing moves), and is scored on what
 it does.
 
-    python3 tools/brain_bench.py gemma4:26b gemma3:4b
+    python3 tools/brain_bench.py gemma4:26b
 
   right   the call the command needs, with the right arguments (and for a refusal, the limit said)
   clean   right, and nothing else that moves the robot (no extra tricks, no stray walks)
@@ -101,7 +101,7 @@ async def one(url: str, model: str, text: str, right, allowed: str, most: int, v
         return m
 
     llm.chat = timed
-    brain = gb.Brain(llm, prompt, decls, backend, said.append, "auto", log=lambda line: None)
+    brain = gb.Brain(llm, prompt, decls, backend, said.append, log=lambda line: None)
     await brain.turn(text)
     backend.rig.close()
     speech = " ".join(said)

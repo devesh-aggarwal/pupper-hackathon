@@ -170,7 +170,7 @@ Debugging: `tail -f /tmp/gemini-pupper/server.log` (your `lab/` code) and
 
 ```bash
 python3 -m pip install --user google-genai pyyaml
-python3 lab/test.py            # all 572 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 234, then the local brain's 80
+python3 lab/test.py            # all 569 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 236, then the local brain's 75
 python3 lab/test.py todo9      # one TODO
 python3 lab/test.py reminders  # the reminders (robot/test_reminders.py)
 python3 lab/test.py hackathon  # memory, screen, sound, vision, eyes, find (explore), guard, learning (or: hackathon explore)
@@ -485,7 +485,7 @@ Running it, from a laptop (one tunnel both ways: the frames come down, `/look` g
 
 ```bash
 python3 -m pip install -r vision/requirements.txt          # numpy, pillow, onnxruntime
-ollama pull gemma3:4b                                        # once; a vision model, on-device
+ollama pull gemma4:26b                                       # once; a vision model, on-device
 ssh -N -L 8000:localhost:8000 -R 8100:localhost:8100 pi@pupper5.local
 python3 vision/eyes.py --fetch-depth-model                   # first time: downloads the ~99 MB model
 python3 vision/eyes.py                                       # then: depth at 5 Hz, Gemma on demand
@@ -498,8 +498,9 @@ Ollama installed there or `--no-gemma`. Without the eyes service nothing changes
 stays out of the way, `go_to` falls back to the COCO detector, and `look` says it has no eyes.
 
 Speeds: depth takes about 60 ms a frame at 252 px on a laptop (Apple Silicon CPU), so 5 Hz is easy,
-and 320-350 ms on the Pi 5. `gemma3:4b` through Ollama takes 1.6 s for a yes/no question and 2.2 s
-for a box or a description.
+and 320-350 ms on the Pi 5. `gemma4:26b` through Ollama on an M4 Pro answers a yes/no question or
+gives a box in about 0.2 s (thinking off; with it on, its few tokens go to thinking and every answer
+comes back empty).
 
 To check the threshold on a new robot or room, grab a frame with
 `curl localhost:8000/camera/image -o frame.jpg` and run `python3 vision/eyes.py --image frame.jpg`:
@@ -764,19 +765,10 @@ it with Pupper on the floor and a hand near the e-stop: it moves when you ask it
 Once per laptop: `./tools/pup setup` (the ssh key) and Ollama (`brew install ollama` or the app).
 
 **The model: `gemma4:26b`.** A mixture of experts with 4B parameters active per token, so it is
-fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. Until it is pulled
-(`ollama pull gemma4:26b`, about 17 GB, once, on a fast network), the script uses the best Gemma
-the Mac already has and says so. `tools/brain_bench.py` scores a model on 17 commands through the
-real prompt and tools, on the fake robot. Measured on the M4 Pro:
-
-| model | right | clean | junk | reply |
-| --- | --- | --- | --- | --- |
-| `gemma4:26b` | 17/17 | 17/17 | 0 | 0.5 s |
-| `gemma3:4b` | 14/17 | 14/17 | 0 | 0.7 s |
-
-"Clean" is right with nothing extra that moves the robot. `gemma3:4b` has no tool calling (it
-answers in JSON), skips `remember`, turns "give me your paw" into a sidestep and doesn't walk the
-square. With `gemma4:26b`, the brain:
+fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. It is the only model: the
+script pulls it the first time (about 17 GB, on a fast network). `tools/brain_bench.py` scores it
+on 17 commands through the real prompt and tools, on the fake robot: on the M4 Pro, 17/17 right,
+17/17 clean (nothing extra that moves the robot), 0.5 s to reply. The brain:
 
 - **keeps thinking off.** On, it made the same choices but took 3.4 s to reply. Off, its thought
   sometimes leaks into a reply after a tool result ("thought ... I found your cup", before any
@@ -804,8 +796,7 @@ Saying just "stop" (or "Pupper, stop") stops the robot at once, without waiting 
 gamepad's e-stop works whatever the brain does. Robot events (reminders, sound alerts, search
 results) become turns, so Pupper speaks up by itself, and what was said goes to the session log
 (`POST /transcript`). How Gemma calls tools: natively (Ollama's tools); if it writes a call out as
-text instead, that still runs; and with a model or an Ollama that can't do tools at all,
-`--tools auto` switches to JSON replies (`{say, calls}`, held to a schema). Arguments like `"1.5"`
+text instead, that still runs. Arguments like `"1.5"`
 for a number are fixed by the declaration; anything else wrong is refused by the robot, with the
 reason, as with Gemini.
 
