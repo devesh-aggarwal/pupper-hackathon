@@ -583,7 +583,8 @@ def brain_state_post(req: BrainStateIn):
 @app.get("/brain/state")
 def brain_state_get():
     """What the face shows for the local brain; age_s says how long since it last spoke up (null: never)."""
-    return {**BRAIN, "age_s": round(time.time() - BRAIN["time"], 1) if BRAIN["time"] else None}
+    return {**BRAIN, "age_s": round(time.time() - BRAIN["time"], 1) if BRAIN["time"] else None,
+            "text": behaviors.needs_text()}  # text on the screen: only for a deaf or hard-of-hearing person
 
 
 @app.post("/brain/announce")

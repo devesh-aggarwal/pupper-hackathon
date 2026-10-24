@@ -107,6 +107,15 @@ def ago(t: float, now: float | None = None) -> str:
 
 
 # ============================================================ what the robot does: behaviors
+DEAF = re.compile(r"\b(deaf|hard of hearing|hearing[- ]impaired|can'?t hear|cannot hear|lip[- ]?read\w*|sign language)\b", re.I)
+
+
+def needs_text() -> bool:
+    """Is the person Pupper is talking with deaf or hard of hearing (a fact it remembers)? Only then does
+    the screen show text: captions, show_text, reminder and alert cards. Everyone else just hears Pupper."""
+    return any(DEAF.search(f["text"]) for f in active_profile(load())["facts"])
+
+
 def remember(fact: str) -> Result:
     """Save one fact about the active person."""
     fact = " ".join(fact.split())[:MAX_FACT_CHARS]

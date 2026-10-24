@@ -147,6 +147,11 @@ async def screen_tests() -> None:
     print("Hackathon B: the screen and events")
     fresh_memory()
     rig = Rig()
+    res = await call(rig, "show_text", text="DOORBELL", detail="14:02", color="red", seconds=5)
+    check("show_text for a hearing person: not shown, say it instead (the screen has text only for the deaf)",
+          not res.ok and "say it out loud" in res.message and alerts.display_state() is None and not memory.needs_text(), res.message)
+    await call(rig, "remember", fact="is deaf")
+    check("... remembering that the person is deaf turns screen text on", memory.needs_text())
     before = alerts.EVENTS.last_id
     res = await call(rig, "show_text", text="DOORBELL", detail="14:02", color="red", seconds=5)
     check("show_text is accepted", res.ok and "DOORBELL" in res.message, res.message)

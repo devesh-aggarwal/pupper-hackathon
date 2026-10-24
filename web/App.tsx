@@ -136,7 +136,9 @@ const App: React.FC = () => {
   }, [view]);
 
   const geminiRef = useRef<GeminiLiveService | null>(null);
-  const localRef = useRef<LocalBrainService | null>(null);  // the local brain: Gemma, on the Mac
+  const localRef = useRef<LocalBrainService | null>(null);
+  // Text on the screen only for a deaf or hard-of-hearing person (lab/hackathon_memory.py, needs_text)
+  const [textOn, setTextOn] = useState(false);  // the local brain: Gemma, on the Mac
   // Persistent bridge instance for polling
   const bridgeRef = useRef<RobotBridge>(new RobotBridge(config.robotApiUrl));
 
@@ -232,6 +234,7 @@ const App: React.FC = () => {
     if (!LOCAL_BRAIN) return;
     const service = new LocalBrainService(bridgeRef.current, { ...config, cameraSource: 'server' }, addLog,
       setAudioLevel, setCaption, on => setConnState(on ? ConnectionState.CONNECTED : ConnectionState.DISCONNECTED));
+    service.onText = setTextOn;
     localRef.current = service;
     service.start();
     return () => { service.stop(); localRef.current = null; };
@@ -328,9 +331,9 @@ const App: React.FC = () => {
             systemStatus={systemStatus}
             config={config}
             videoElement={videoElement}
-            display={display}
-            caption={caption}
-            hearing={hearing}
+            display={textOn ? display : null}
+            caption={textOn ? caption : null}
+            hearing={textOn ? hearing : null}
             onDismissDisplay={() => showDisplay(null)}
           />
         ) : (
@@ -344,7 +347,7 @@ const App: React.FC = () => {
           />
         )}
 
-        {reminderBanners.length > 0 && (
+        {textOn && reminderBanners.length > 0 && (
           // A card at the top, not a takeover: the face stays visible. Tap the card to
           // dismiss (pointerup fires for touch, pen and mouse; manipulation stops zoom).
           <div className="absolute top-6 inset-x-0 z-50 flex justify-center px-4 pointer-events-none">

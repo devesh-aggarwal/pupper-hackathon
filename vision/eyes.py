@@ -382,15 +382,26 @@ class Gemma:
     def __init__(self, url: str, model: str, timeout: float = 60.0):
         self.url, self.model, self.timeout = url.rstrip("/"), model, timeout
 
+    think: bool | None = False  # Gemma 4 thinks unless told not to: its few tokens went to thinking, and
+    # exists() got "" (no) for everything in view. None: a model that can't be told (Ollama says so).
+
     def ask(self, image_jpeg: bytes, prompt: str, json_mode: bool = False, max_tokens: int = 120) -> str:
         body = {"model": self.model, "prompt": prompt, "images": [base64.b64encode(image_jpeg).decode()],
                 "stream": False, "options": {"temperature": 0.1, "num_predict": max_tokens}}
+        if self.think is not None:
+            body["think"] = self.think
         if json_mode:
             body["format"] = "json"
         req = urllib.request.Request(self.url + "/api/generate", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            return json.loads(r.read().decode()).get("response", "").strip()
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return json.loads(r.read().decode()).get("response", "").strip()
+        except urllib.error.HTTPError as e:
+            if self.think is not None and "think" in e.read().decode(errors="replace").lower():
+                self.think = None
+                return self.ask(image_jpeg, prompt, json_mode, max_tokens)
+            raise
 
     def exists(self, image_jpeg: bytes, name: str) -> bool:
         """Is ``name`` clearly in the frame? Asked before locate(): asked for a box, a small model draws

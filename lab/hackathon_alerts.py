@@ -227,6 +227,9 @@ def sound_detected(robot: Robot, above_db: float, level_db: float = 0.0, duratio
 async def show_text_tool(robot: Robot, text: str, detail: str = "", color: str = "blue", seconds: float = 10.0) -> Result:
     if not text.strip():
         return Result(False, "nothing to show: give a few words")
+    if not memory.needs_text():
+        return Result(False, "not shown: the screen shows text only for a deaf or hard-of-hearing person"
+                             " (remember it if they say so); say it out loud instead")
     show(text, detail, color, seconds)
     return Result(True, f"showing '{text.strip()[:80]}' on the screen in {color} for {max(1.0, min(seconds, 600.0)):g} s")
 

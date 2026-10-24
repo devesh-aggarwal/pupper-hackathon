@@ -741,6 +741,12 @@ the on-device object detector on the camera, and reminders. A due reminder's car
 face, and the app hands it to the brain to say (`POST /brain/announce`, an event the brain reads
 like any other). Without a face, the brain claims due reminders itself, a minute late.
 
+**Text on the screen only for a deaf person.** Pupper speaks. Captions, `show_text`, reminder and
+alert cards and the "what Pupper hears" label appear only when the person it is talking with is
+deaf or hard of hearing: a fact it remembers about them ("I'm deaf" -> `remember`;
+`needs_text()` in `lab/hackathon_memory.py`, reported in `GET /brain/state`). Otherwise
+`show_text` declines and Gemma says it instead.
+
 Ctrl+C stops the brain and the robot (`robot/stop.sh`); so does the ssh connection dropping. Run
 it with Pupper on the floor and a hand near the e-stop: it moves when you ask it to.
 
