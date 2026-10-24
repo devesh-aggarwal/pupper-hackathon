@@ -50,7 +50,7 @@ curl -s -o /dev/null localhost:8000/health || { echo "robot server did not start
 # Log: $LOG/eyes.log. PUPPER_EYES=off skips this.
 pkill -f "[v]ision/eyes.py" 2>/dev/null
 # Gemma: through Google's API with the Gemini key while there is no Jetson; PUPPER_EYES_GEMMA=ollama
-# asks the local brain's Ollama instead ($PUPPER_OLLAMA, $PUPPER_GEMMA: the Mac or the Jetson), and
+# asks the local brain's Ollama instead ($PUPPER_OLLAMA, $PUPPER_GEMMA: the Mac), and
 # PUPPER_EYES_GEMMA=off is depth + detector only.
 GEMMA="--no-gemma"
 case "${PUPPER_EYES_GEMMA:-api}" in

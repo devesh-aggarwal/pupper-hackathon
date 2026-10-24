@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desk tests for the local brain (robot/gemma_brain.py): no Jetson, no Ollama, no mic, no robot.
+"""Desk tests for the local brain (robot/gemma_brain.py): no Mac servers, no Ollama, no mic, no robot.
 
     python3 lab/test.py brain          # these
     python3 robot/test_gemma_brain.py  # the same
@@ -174,7 +174,7 @@ def translation_tests() -> None:
 
     check("pick_model: the 26B over the small ones",
           gb.pick_model(["gemma4:e2b-it-qat", "gemma4:26b-a4b-it-qat", "llama3:8b"]) == "gemma4:26b-a4b-it-qat")
-    check("pick_model: an Orin Nano's e2b", gb.pick_model(["gemma4:e2b-it-qat", "nomic-embed-text"]) == "gemma4:e2b-it-qat")
+    check("pick_model: a small Gemma 4 (e2b) if that's all there is", gb.pick_model(["gemma4:e2b-it-qat", "nomic-embed-text"]) == "gemma4:e2b-it-qat")
     check("pick_model: gemma4:latest counts as gemma4", gb.pick_model(["gemma4:latest", "gemma4:e2b"]) == "gemma4:latest")
     check("pick_model: no Gemma, no model", gb.pick_model(["llama3:8b"]) is None)
     check("speech is cleaned of markdown", gb.clean_speech("**Sure!** I'll  _walk_\n now.") == "Sure! I'll walk now.")
@@ -347,7 +347,7 @@ def cli_tests() -> None:
           proc.returncode == 1 and "ollama pull gemma4:26b" in proc.stdout, proc.stdout[-300:])
     ollama2.close()
     proc = subprocess.run([sys.executable, str(script), "--ollama", "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
-    check("no Jetson: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
+    check("no Ollama: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
 
 
 GROUPS = {"translation": translation_tests, "loop": loop_tests, "voice": voice_tests, "cli": cli_tests}

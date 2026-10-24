@@ -6,16 +6,16 @@ replaces it. It is robot/gemini_chat.py's loop with Gemma in Ollama instead of G
 the same prompt and tools (GET /tools), every call sent to the robot server (POST /tools/<name>),
 and its {success, message} given back to Gemma word for word.
 
-    python3 robot/gemma_brain.py --check               # can the Pi reach Gemma (and whisper) on the Jetson?
+    python3 robot/gemma_brain.py --check               # can this machine reach Gemma (and whisper) on the Mac?
     python3 robot/gemma_brain.py                       # type to Gemma: your tools on a fake robot (nothing moves)
     python3 robot/gemma_brain.py --robot               # type to Gemma: the real robot server (it moves!)
     python3 robot/gemma_brain.py --robot --voice       # talk to Pupper: mic, whisper, Gemma, Piper (it moves!)
 
-Where things run (the README's "Gemma on the Jetson" has the setup):
-  the Pi      this script, the robot server (localhost:8000), the mic, the speaker, Piper (speech)
-  the Jetson  Ollama with Gemma (10.10.10.1:11434) and whisper.cpp's server (10.10.10.1:8080),
-              on the Ethernet cable between the two (jetson/link.sh), listening on nothing else
-The robot server stays on the Pi's localhost, so nothing on the network can move the robot.
+Where things run (./run_pupper.sh on the Mac sets it all up: tools/brain_on_mac.sh):
+  the Pi   this script, the robot server (localhost:8000), the mic, the speaker, Piper (speech)
+  the Mac  Ollama with Gemma and whisper.cpp's server, over WiFi ($PUPPER_OLLAMA, $PUPPER_WHISPER)
+The robot server stays on the Pi's localhost, so nothing on the network can move the robot. Run on
+the Mac itself, without --robot, it talks to the Mac's own Ollama: a quick try on the fake robot.
 
 Gemma calls tools natively (Ollama's tools), or, with a model or an Ollama that can't, by naming
 them in a JSON reply (--tools json); auto tries native first and falls back. Robot events (a
@@ -53,13 +53,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from gemini_chat import DeskBackend, RobotBackend  # noqa: E402  the same two robots Gemini's chat talks to
 
-JETSON = os.environ.get("PUPPER_JETSON", "10.10.10.1")  # its address on the cable (jetson/link.sh)
-OLLAMA_URL = os.environ.get("PUPPER_OLLAMA", f"http://{JETSON}:11434")
-WHISPER_URL = os.environ.get("PUPPER_WHISPER", f"http://{JETSON}:8080")
+# On the Pupper, run_pupper.sh sets these to the Mac's servers; the defaults are this machine's own.
+OLLAMA_URL = os.environ.get("PUPPER_OLLAMA", "http://localhost:11434")
+WHISPER_URL = os.environ.get("PUPPER_WHISPER", "http://localhost:8178")
 PIPER_VOICE = Path(os.environ.get("PUPPER_PIPER_VOICE", Path.home() / ".local/share/piper/en_US-lessac-medium.onnx"))
-# Without --model, the first of these that Ollama has: the biggest Gemma first. Thor runs the
-# 26B (a mixture of experts, 4B active per token: fast, and much the best at picking tools); an
-# 8 GB Orin Nano has room for e2b and whisper, not e4b (6.6 GB) as well.
+# Without --model, the first of these that Ollama has: the biggest Gemma first. The 26B is a
+# mixture of experts, 4B active per token: fast for its size, and much the best at picking tools.
 PREFERRED = ("gemma4:26b-a4b", "gemma4:26b", "gemma4:12b", "gemma4:e4b", "gemma4", "gemma4:e2b",
              "gemma3:12b", "gemma3:4b")
 NUM_CTX = 16384  # the prompt and 30 tools are about 8k tokens: Ollama's default context would cut them off
@@ -179,7 +178,7 @@ def clean_speech(text: str) -> str:
     return " ".join(re.sub(r"[*_#`>]+", "", text or "").split())
 
 
-# ============================================================ Gemma, in Ollama on the Jetson
+# ============================================================ Gemma, in Ollama on the Mac
 class OllamaError(RuntimeError):
     pass
 
@@ -205,7 +204,7 @@ class Ollama:
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None, fmt: dict | None = None) -> dict:
         # keep_alive -1: stay loaded (a reload is 10-30 s); num_ctx must match what the eyes'
-        # requests get (OLLAMA_CONTEXT_LENGTH, jetson/setup.sh), or Ollama reloads between them.
+        # requests get (OLLAMA_CONTEXT_LENGTH, tools/brain_on_mac.sh), or Ollama reloads between them.
         body = {"model": self.model, "messages": messages, "stream": False, "keep_alive": -1,
                 "options": {"num_ctx": self.num_ctx, "temperature": 0.3}}
         if self.think is not None:
@@ -498,7 +497,7 @@ def clean_heard(text: str) -> str:
 
 
 class Whisper:
-    """Speech to text: whisper.cpp's server (whisper-server) on the Jetson, POST /inference."""
+    """Speech to text: whisper.cpp's server (whisper-server) on the Mac, POST /inference."""
 
     def __init__(self, url: str, timeout: float = 30.0):
         self.url, self.timeout = url.rstrip("/"), timeout
@@ -632,7 +631,7 @@ async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Spe
 
 # ============================================================ checks, and main
 def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = False) -> int:
-    """Is the brain's machine (the Mac or the Jetson) reachable from here, and can its Gemma call a
+    """Is the Mac reachable from here, and can its Gemma call a
     tool? With voice, whisper must answer too. Exits non-zero, saying what to fix, if not."""
     print(f"Ollama at {ollama_url} ... ", end="", flush=True)
     try:
@@ -640,7 +639,7 @@ def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = Fa
     except (OllamaError, urllib.error.URLError, OSError) as e:
         print(f"unreachable ({e}).\n  Is that machine on and Ollama listening on the network, not only on its"
               " localhost? Can this one reach it at all (ping it)? Venue WiFi often keeps devices from"
-              " reaching each other: then use a phone hotspot. With a Jetson: jetson/link.sh status, on both.")
+              " reaching each other: then use a phone hotspot.")
         return 1
     print("ok: " + (", ".join(names) or "no models"))
     if model and model not in names and model + ":latest" not in names:
@@ -648,7 +647,7 @@ def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = Fa
         return 1
     chosen = model or pick_model(names)
     if not chosen:
-        print("  No Gemma pulled. On the Jetson: ollama pull gemma4:26b (Thor) or gemma4:e2b-it-qat (Orin Nano)")
+        print("  No Gemma pulled. On the Mac: ollama pull gemma4:26b")
         return 1
     llm = Ollama(ollama_url, chosen)
     t0 = time.time()
@@ -713,8 +712,8 @@ def main() -> None:
     ap.add_argument("--robot", nargs="?", const="http://localhost:8000", metavar="URL",
                     help="the real robot server (default http://localhost:8000): Pupper moves!")
     ap.add_argument("--voice", action="store_true", help="talk and listen (mic, whisper, Piper) instead of typing")
-    ap.add_argument("--check", action="store_true", help="check the Jetson's Ollama and whisper from here, and exit")
-    ap.add_argument("--ollama", default=OLLAMA_URL, help=f"Ollama on the Jetson (default {OLLAMA_URL}; $PUPPER_OLLAMA)")
+    ap.add_argument("--check", action="store_true", help="check the Mac's Ollama and whisper from here, and exit")
+    ap.add_argument("--ollama", default=OLLAMA_URL, help=f"Ollama on the Mac (default {OLLAMA_URL}; $PUPPER_OLLAMA)")
     ap.add_argument("--model", default=os.environ.get("PUPPER_GEMMA"),
                     help="the Gemma in Ollama (default: the biggest one it has; $PUPPER_GEMMA)")
     ap.add_argument("--tools", choices=["auto", "native", "json"], default="auto",
@@ -739,8 +738,7 @@ def main() -> None:
         except (OllamaError, urllib.error.URLError, OSError) as e:
             sys.exit(f"Can't reach Ollama at {args.ollama} ({e}). python3 robot/gemma_brain.py --check helps.")
         if not model:
-            sys.exit(f"Ollama at {args.ollama} has no Gemma: on the Jetson, ollama pull gemma4:26b (Thor) "
-                     "or gemma4:e2b-it-qat (Orin Nano).")
+            sys.exit(f"Ollama at {args.ollama} has no Gemma: on the Mac, ollama pull gemma4:26b")
 
     try:
         asyncio.run(run(args, model))  # setup inside the loop: the fake robot's job queue lives on it

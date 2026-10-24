@@ -58,10 +58,9 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
   in legs toward open floor it hasn't been on, and walks up to the thing when it finds it.
 - **Learning on the fly** (`learn_routine`, `do_routine`): "learn a happy dance: a push-up, then
   spin around" records real tool calls as a named routine, no retraining.
-- **A local brain** (`robot/gemma_brain.py`): Gemma on a Mac (`./run_pupper.sh` there) or a
-  Jetson, in place of Gemini Live: speech to text, Gemma, the same tools, text to speech, no
-  cloud. See [The local brain on a Mac](#the-local-brain-on-a-mac) and
-  [on a Jetson](#the-local-brain-gemma-on-a-jetson-by-ethernet).
+- **A local brain** (`robot/gemma_brain.py`): Gemma on a Mac (`./run_pupper.sh` there), in place
+  of Gemini Live: speech to text, Gemma, the same tools, text to speech, no cloud. See
+  [The local brain on a Mac](#the-local-brain-on-a-mac).
 
 ## What's where
 
@@ -84,14 +83,13 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 │   ├── hackathon_log.py        the session log: tool calls, events, speech, frames (~/pupper-logs)
 │   ├── test.py          python3 lab/test.py      (tests on a fake robot: the lab's and the hackathon's)
 │   └── chat.py          python3 lab/chat.py      (talk to Gemini in text)
-├── jetson/              the local brain's setup: setup.sh (the Jetson), setup_pi.sh (the Pi), link.sh (the cable)
 ├── vision/              the eyes service: eyes.py (depth + Gemma, beside the robot server), test_eyes.py
 ├── tricks/              one folder per trick (policy.json + trick.yaml)
 │   ├── sit_stay_shake/  trained here; covers sit and stand_sit_shake_sit_stand, so it hides them
 │   └── spider_walk/     trained here: clip policy + walk_policy.json; covers spider, so it hides it
 ├── robot/               the Robot API, robot server, launch files, setup/start/stop scripts
 │                        (test_tools.py: the lab's tests; test_hackathon.py: the hackathon's)
-│                        gemma_brain.py: the local brain (Gemma on the Jetson); test_gemma_brain.py
+│                        gemma_brain.py: the local brain (Gemma on the Mac); test_gemma_brain.py
 ├── web/                 the web app (face + debug view, Gemini Live client; services/soundMonitor.ts,
 │                        objectDetector.ts and robotEvents.ts are the hackathon's senses;
 │                        localBrain.ts is the face for the local brain, ?brain=local)
@@ -653,7 +651,7 @@ Two models, two jobs, and they are kept apart on purpose:
 
 | | Model | Runs | Talks to the robot through |
 | --- | --- | --- | --- |
-| **The brain**: hears, talks, decides, calls tools | Gemini Live (cloud API), or for the hackathon Gemma 4 + whisper + Piper (local) | the browser (`web/`); or `robot/gemma_brain.py` on the Pi, with Gemma and whisper on the Mac or the Jetson | `GET /tools`, `POST /tools/<name>` |
+| **The brain**: hears, talks, decides, calls tools | Gemini Live (cloud API), or for the hackathon Gemma 4 + whisper + Piper (local) | the browser (`web/`); or `robot/gemma_brain.py` on the Pi, with Gemma and whisper on the Mac | `GET /tools`, `POST /tools/<name>` |
 | **The eyes**: depth, "where is X in the frame", "what is around" | Depth Anything V2 Small (ONNX) + Gemma 3 4B (Ollama) | `vision/eyes.py`, on a laptop today, the Jetson tomorrow | `POST /vision/*`, `GET /vision/wanted`, `/look` |
 | **The legs**: walking, tricks | the trained policies | ROS 2 on the Pi | `robot_api.py` |
 
@@ -670,10 +668,10 @@ The Jetson that arrives at the hackathon changes where things run, not how they 
 eyes service runs on a laptop on the same network (Ollama on the laptop, frames through the SSH
 tunnel), because the Pi 5's CPU cannot run Gemma at a useful speed. On the Jetson, mounted on the
 Pupper, the same `vision/eyes.py` runs with Ollama there (`--robot http://<pi>:8000`), and the whole
-eyes half is on-device. The brain moves too: `robot/gemma_brain.py` replaces Gemini Live with Gemma
-on the Jetson (plus whisper for speech to text and Piper for text to speech), see
-[The local brain](#the-local-brain-gemma-on-a-jetson-by-ethernet). One Gemma instance can serve both
-the brain and the eyes, since the eyes are a few calls a second at most.
+eyes half is on-device. The brain is local too: `robot/gemma_brain.py` replaces Gemini Live with
+Gemma on a Mac (plus whisper for speech to text and Piper for text to speech), see
+[The local brain on a Mac](#the-local-brain-on-a-mac). One Gemma instance serves both the brain and
+the eyes, since the eyes are a few calls a second at most.
 
 ## The local brain on a Mac
 
@@ -748,82 +746,24 @@ Things to know:
   While this runs, both are reachable by anyone on the same network.
 - **The Mac's terminal** shows what Pupper hears, says and does, besides the face.
 - **Is a laptop "on-device"?** The model runs on the table in front of you, with no cloud. Check with
-  the organizers that this counts; the Jetson setup below is the stricter answer.
+  the organizers that this counts.
 
-## The local brain: Gemma on a Jetson, by Ethernet
-
-The hackathon forbids the cloud, and Gemini Live is cloud. `robot/gemma_brain.py` is the brain
-without it: `lab/chat.py`'s loop with Gemma (in Ollama) instead of Gemini, plus ears and a voice. It
-reads the same prompt and tools (`GET /tools`), sends every call to the robot server
-(`POST /tools/<name>`) and gives Gemma the `{success, message}` word for word, so the `lab/` tools,
-the queue, the limits and the obstacle rules are exactly the ones Gemini drives.
-
-```
-  laptop ~~WiFi~~ Pi 5 (pupper5.local)                      Jetson (Thor or Orin Nano)
-                  robot/server.py :8000  (localhost only)    Ollama + Gemma 4   10.10.10.1:11434
-                  robot/gemma_brain.py   ==== Ethernet ====  whisper.cpp server 10.10.10.1:8080
-                  mic, speaker, Piper    10.10.10.2          (vision/eyes.py too, if you like)
-```
-
-The brain runs on the Pi, beside the mic and the speaker. Only the heavy parts are on the Jetson:
-Gemma, and whisper (speech to text, on its GPU). Both listen only on the cable. The robot server
-stays on the Pi's localhost, so nothing on any network can move the robot, and no audio has to cross
-the cable on the way back (Piper speaks on the Pi).
-
-**Which Jetson.** Use the Thor if you have the choice. The two run different Gemmas, and the
-difference is in how well they pick tools:
-
-| | Thor | Orin Nano (8 GB) |
-| --- | --- | --- |
-| Gemma | `gemma4:26b` (a mixture of experts: 4B active per token, so it is fast) | `gemma4:e2b-it-qat` (4.3 GB; `e4b` is 6.6 GB and doesn't fit beside whisper) |
-| Tool calling | good | weak: give it fewer tools (`--only`) |
-| whisper | `small.en` | `base.en` |
-| Where | on the table, on wall power, the cable to Pupper | can ride on Pupper, with its own battery (not Pupper's) |
-
-`gemma_brain.py` picks the biggest Gemma Ollama has, so the same code runs on either.
-
-**Wiring.** One Ethernet cable straight from the Pi's port to the Jetson's. No switch, and any
-cable works (both ends swap pairs by themselves). This is the port Lab 1 used for the laptop, so the
-laptop now reaches the Pi over WiFi (`ssh pi@pupper5.local`). `jetson/link.sh pi down` puts the Pi
-back to Lab 1's setup (DHCP on the cable, the laptop sharing its internet). The Jetson runs on its
-own power supply.
-
-**Setup, once** (each needs the internet for its downloads, over WiFi; after that, nothing goes out):
+**The brain by itself**, to try a model or a prompt change without the robot:
 
 ```bash
-# on the Jetson, in a clone of this repo: the cable (10.10.10.1), Ollama + Gemma, whisper.cpp on the GPU
-jetson/setup.sh                 # or: jetson/setup.sh gemma4:e4b   (another model)
-# on the Pi: the cable (10.10.10.2), Piper and its voice, espeak-ng
-jetson/setup_pi.sh
-# on the Pi: is everything reachable, how fast is Gemma, can it call a tool?
-python3 robot/gemma_brain.py --check
-jetson/link.sh status           # on either end: the address, and a ping to the other end
-```
-
-**Running.** Try it without the robot first, then in text on the robot, then by voice:
-
-```bash
-python3 robot/gemma_brain.py                     # type; your tools on the fake robot: nothing moves
-robot/start.sh                                   # on the Pupper: the robot, no kiosk (see below)
-python3 robot/gemma_brain.py --robot             # type to the real robot: it moves!
-python3 robot/gemma_brain.py --robot --voice     # talk to it: it moves!
-python3 robot/gemma_brain.py --robot --voice --camera   # Gemma also sees the newest frame each turn
+python3 robot/gemma_brain.py              # on the Mac: type to Gemma (the Mac's Ollama), your tools on the fake robot
+python3 robot/gemma_brain.py --check      # is Ollama up, how fast is Gemma, can it call a tool?
 python3 robot/gemma_brain.py --only stand_up,lie_down,stop,move,turn,play_trick,set_reminder,show_text
 ```
 
-With `--robot`, Pupper is on the ground with a hand near the e-stop, as always. Start the robot
-with the face only (`robot/start.sh --face`), never `--kiosk`: that kiosk connects Gemini Live (a
-second brain, and cloud). Saying just "stop" (or "Pupper,
-stop") stops the robot at once, without waiting for Gemma. The gamepad's e-stop works whatever the
-brain does.
-
-What it does that the web app did: robot events (reminders, sound alerts, search results) become
-turns, so Pupper speaks up by itself; due reminders are claimed and delivered (`/reminders/claim`);
-what was said goes to the session log (`POST /transcript`). How Gemma calls tools: natively
-(Ollama's tools); if it writes a call out as text instead, that still runs; and with a model or an
-Ollama that can't do tools at all, `--tools auto` switches to JSON replies (`{say, calls}`, held to a
-schema). Arguments like `"1.5"` for a number are fixed by the declaration; anything else wrong is
-refused by the robot, with the reason, as with Gemini.
+Saying just "stop" (or "Pupper, stop") stops the robot at once, without waiting for Gemma. The
+gamepad's e-stop works whatever the brain does. Robot events (reminders, sound alerts, search
+results) become turns, so Pupper speaks up by itself, and what was said goes to the session log
+(`POST /transcript`). How Gemma calls tools: natively (Ollama's tools); if it writes a call out as
+text instead, that still runs; and with a model or an Ollama that can't do tools at all,
+`--tools auto` switches to JSON replies (`{say, calls}`, held to a schema). Arguments like `"1.5"`
+for a number are fixed by the declaration; anything else wrong is refused by the robot, with the
+reason, as with Gemini.
 
 What it does not do yet, compared with Gemini Live:
 
@@ -831,10 +771,6 @@ What it does not do yet, compared with Gemini Live:
   heard mid-sentence; the e-stop is.
 - **Slower turns**: the end of your sentence (0.8 s of quiet), whisper, then Gemma. `--check`
   prints Gemma's times; the first call after a start loads the model (10-30 s).
-- **Not tried on a real Jetson yet.** The loop is tested against a fake Ollama
-  (`python3 lab/test.py brain`), and the setup scripts follow Ollama's and whisper.cpp's docs.
-  Run `--check` first, and expect to adjust `jetson/setup.sh` on the day (the Thor's JetPack 7
-  in particular).
 
 ## Hackathon plan
 
@@ -853,8 +789,8 @@ Google Gemma Hardware Hackathon:
 - **Biggest change from Lab 6:** Lab 6 is driven by **Gemini Live, a cloud API**, which the
   hackathon forbids. We keep the Lab 6 architecture (tools, the job queue, policies, tricks) and
   replace Gemini Live with a **local Gemma** brain, plus local speech-to-text and text-to-speech:
-  `robot/gemma_brain.py` on the Pi, with Gemma and whisper on a Jetson by an Ethernet cable
-  ([The local brain](#the-local-brain-gemma-on-a-jetson-by-ethernet)). The features above are
+  `robot/gemma_brain.py` on the Pi, with Gemma and whisper on a Mac over WiFi
+  ([The local brain on a Mac](#the-local-brain-on-a-mac)). The features above are
   already brain-agnostic: tools, events and endpoints on the robot; the object detector and the
   sound monitor already run on-device.
 
