@@ -74,6 +74,108 @@ def blocked(st: dict[str, dict]) -> list[str]:
     return [n for n in STRIPS if st[n]["closest_m"] is not None and st[n]["closest_m"] <= STOP_M]
 
 
+BLOCK_NEARNESS = 0.68  # keep in step with lab/hackathon_vision.py
+FRAME = (1400, 1050)
+GEOM = (680.0 - 467.0, 479.0 - 467.0, 934.0)  # the disc crop around Lab 5's calibrated centre (fisheye_geom CX, CY)
+
+
+def floor_scene(things=(), h: float = H, n: int = 224, scale: float = 3.0, offset: float = 0.2) -> np.ndarray:
+    """A closeness map of the disc crop, ray-cast through the calibrated lens: a floor h below the
+    camera, and things standing on it, each (ahead_m, right_from_m, right_to_m, height_m): a box face
+    that far ahead. Closeness = scale / distance along the ray + offset, like a relative model's."""
+    import eyes
+
+    rays = eyes.floor_rays(n, GEOM, FRAME)
+    dist = np.where(rays.d > 1e-3, h / np.maximum(rays.d, 1e-3), 20.0)
+    for thing in things:
+        ahead, r0, r1, height = thing[:4]
+        bottom = thing[4] if len(thing) > 4 else 0.0  # above the floor: a shelf, with nothing beneath it
+        t = ahead / np.maximum(rays.f, 1e-6)
+        hit = (rays.f > 1e-3) & (t * rays.r >= r0) & (t * rays.r <= r1) & (h - t * rays.d >= bottom) & (h - t * rays.d <= height)
+        dist = np.where(hit, np.minimum(dist, t), dist)
+    out = np.zeros(n * n)
+    out[rays.flat] = scale / np.minimum(dist, 20.0) + offset
+    return out.reshape(n, n)
+
+
+def floor_rule() -> None:
+    """The floor-anchored rule (freespace_floor) on ray-cast scenes, and the lens rim finder."""
+    import eyes
+
+    print("\nEyes: metres from the floor (freespace_floor, through Lab 5's calibrated lens)")
+
+    def run(things=(), h: float = H, **kw):
+        strips, fit = eyes.freespace_floor(floor_scene(things, h, **kw), GEOM, FRAME, h)
+        return ({s["name"]: s for s in strips} if strips else None), fit
+
+    def hits(st):
+        return [n for n in STRIPS if st[n]["nearness"] is not None and st[n]["nearness"] >= BLOCK_NEARNESS]
+
+    import fisheye_geom
+
+    rays, n = eyes.floor_rays(224, GEOM, FRAME), 224
+    worst = 0.0
+    for i in rays.flat[:: max(1, len(rays.flat) // 400)]:
+        row, col = divmod(int(i), n)
+        u, v = GEOM[0] + (col + 0.5) / n * GEOM[2], GEOM[1] + (row + 0.5) / n * GEOM[2]
+        x, y, z = fisheye_geom.unproject(u, v)
+        j = int(np.searchsorted(rays.flat, i))
+        worst = max(worst, abs(rays.r[j] - x), abs(rays.d[j] - y), abs(rays.f[j] - z))
+    check("every pixel's ray is Lab 5's (fisheye_geom.unproject)", worst < 1e-6, f"worst difference {worst:.2e}")
+
+    st, fit = run()
+    check("an empty floor fits, and is clear in every strip", st is not None and all(s["closest_m"] is None for s in st.values()),
+          str(fit))
+    st, _ = run([(0.30, -0.02, 0.02, 0.4)])
+    check("a chair leg 30 cm ahead blocks the centre strip only (by Lab 5's row, as the robot reads it)",
+          st is not None and hits(st) == ["center"], str(st and hits(st)))
+    check("... at about the right distance (0.30 m, within 15 %)", st is not None and st["center"]["closest_m"] is not None
+          and abs(st["center"]["closest_m"] - 0.30) <= 0.045, str(st and st["center"]))
+    st, _ = run([(0.80, -0.02, 0.02, 0.4)])
+    check("the same leg 0.8 m away is seen at about 0.8 m and does not block", st is not None and not hits(st)
+          and st["center"]["closest_m"] is not None and abs(st["center"]["closest_m"] - 0.8) <= 0.12, str(st and st["center"]))
+    st, _ = run([(0.30, -0.30, -0.05, 0.3)])
+    check("a wide box ahead-left blocks centre-left, not the right", st is not None and "center-left" in hits(st)
+          and "right" not in hits(st) and "center-right" not in hits(st), str(st and hits(st)))
+    st, _ = run([(0.30, 0.12, 0.25, 0.10)])
+    check("a shoe 30 cm ahead on the right blocks centre-right only", st is not None and hits(st) == ["center-right"],
+          str(st and hits(st)))
+    st, _ = run([(0.30, -0.6, 0.6, 0.015)])
+    check("a 1.5 cm cable lying flat is not an obstacle", st is not None and not hits(st), str(st and hits(st)))
+    st, _ = run([(0.30, -0.15, 0.15, 0.40, 0.25)])
+    check("a shelf 25-40 cm up, 30 cm ahead, nothing beneath: found at its own distance (no base on the floor)",
+          st is not None and st["center"]["closest_m"] is not None and abs(st["center"]["closest_m"] - 0.30) <= 0.045,
+          str(st and st["center"]))
+    st, _ = run([(0.06, 0.12, 0.16, 0.10)])
+    check("Pupper's own paw beside the camera is not an obstacle", st is not None and not hits(st), str(st and hits(st)))
+    a, _ = run([(0.30, -0.02, 0.02, 0.4)])
+    b, _ = run([(0.30, -0.02, 0.02, 0.4)], scale=0.5, offset=1.0)
+    check("the result does not depend on the depth model's scale or offset", a == b)
+    st, _ = run([(0.30, -0.02, 0.02, 0.4)], h=0.12)
+    check("lying down (camera 12 cm up) the leg is still found at about 0.30 m", st is not None
+          and st["center"]["closest_m"] is not None and abs(st["center"]["closest_m"] - 0.30) <= 0.045, str(st and st["center"]))
+    st, fit = run([(0.15, -3.0, 3.0, 2.0)])
+    check("no floor in view (a wall 15 cm ahead): no fit, so no floor-anchored answer", st is None and fit is None)
+    cl = floor_scene([(0.15, -3.0, 3.0, 2.0)])
+    _, used = eyes.freespace_summary(cl, None, 180.0, circle_mask(224), H, GEOM, FRAME)
+    check("... and the base-of-surface rule answers instead", used is None)
+    _, used = eyes.freespace_summary(floor_scene(), None, 180.0, circle_mask(224), H, GEOM, FRAME, "surface")
+    check("--depth-method surface: the base-of-surface rule only", used is None)
+
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("  (the rim finder's check needs pillow: skipped)")
+        return
+    im = Image.new("RGB", FRAME)
+    draw = ImageDraw.Draw(im)
+    draw.rectangle((380, 0, 980, 60), fill=(255, 255, 255))  # the ceiling lights' glare above the lens
+    draw.ellipse((680 - 467, 479 - 467, 680 + 467, 479 + 467), fill=(120, 120, 110), outline=(230, 120, 40), width=8)
+    cx, cy, r = eyes.ring_circle(im) or (0, 0, 0)
+    check("the rim finder finds the disc from its orange rim, glare or not",
+          abs(cx - 680 / 1400) < 0.01 and abs(cy - 479 / 1050) < 0.01 and abs(r - 467 / 1400) < 0.01, f"{cx}, {cy}, {r}")
+
+
 def depth_models() -> None:
     """The depth model's plumbing, with no model and no network: which file is loaded, the checked
     download, where it runs, and the mirror averaging."""
@@ -205,6 +307,7 @@ def main() -> None:
     check("gating: stand down while another eyes service posts", next_period({"attention": True, "others_posting": True}, 5.0) is None)
     check("gating: no status at all means full rate (the robot's reply decides, not a guess)", next_period({"attention": True}, 2.0) == 0.5)
 
+    floor_rule()
     depth_models()
 
     print()

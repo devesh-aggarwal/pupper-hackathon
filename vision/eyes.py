@@ -12,9 +12,10 @@ follow mode on, a tool called in the last 10 s), once every 5 s while it is idle
 while another eyes service (a laptop's, the Jetson's) is posting, so the Pi stays cool:
 
   1. fetches the camera frame the robot server already serves (GET /camera/image),
-  2. runs a monocular depth model on it (Distill-Any-Depth Small, ONNX, on the CPU) and posts a
-     free-space summary to POST /vision/freespace: for five vertical strips of the lower half of the
-     frame, how close the nearest surface is. lab/hackathon_vision.py turns that into "blocked" and
+  2. runs a monocular depth model on it (Distill-Any-Depth Small, ONNX, on the CPU), turns its relative
+     output into metres by fitting it to the floor through Lab 5's calibrated lens (freespace_floor),
+     and posts a free-space summary to POST /vision/freespace: for five strips of the view by bearing,
+     how near the nearest thing standing on the floor is. lab/hackathon_vision.py turns that into "blocked" and
      refuses or stops moves. This is class-agnostic: a chair leg, a cable, a shoe all count,
   3. asks the robot what go_to wants found (GET /vision/wanted) and, when there is something, asks
      Gemma where it is in the frame and posts the box to POST /vision/target (about once a second),
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import io
 import json
 import logging
@@ -122,8 +124,60 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # ============================================================ the fisheye's image circle
 def find_circle(image) -> tuple[float, float, float]:
     """Pupper's fisheye draws a bright disc in the middle of a black frame; the 180 degrees span the
-    disc's diameter. Returns (cx, cy, r) as fractions of the width (cy of the height), found from
-    where the bright pixels are. A frame with no black border gives (0.5, 0.5, 0.5)."""
+    disc's diameter. Returns (cx, cy, r) as fractions of the width (cy of the height). The lens's
+    orange rim is fitted first (ring_circle); without one, the disc is found from where the bright
+    pixels are. A frame with no black border gives (0.5, 0.5, 0.5)."""
+    ring = ring_circle(image)
+    if ring is not None:
+        return ring
+    return bright_circle(image)
+
+
+def ring_circle(image) -> tuple[float, float, float] | None:
+    """The disc from the lens's orange rim: a circle fitted to the orange pixels, RANSAC'd so stray
+    orange elsewhere doesn't count. Measured on 188 real frames, it sits on the rim, while
+    bright_circle put the centre about 6 % of the height too high (the ceiling lights' glare above the
+    lens counts as bright), which cut the nearest floor off the bottom of the crop. None: no rim found."""
+    from PIL import Image
+
+    w0, h0 = image.size
+    W = 320
+    H = max(1, int(round(W * h0 / max(1, w0))))
+    a = np.asarray(image.convert("RGB").resize((W, H), Image.BILINEAR), dtype=np.float32)
+    R, G, B = a[..., 0], a[..., 1], a[..., 2]
+    ys, xs = np.nonzero((R > 90) & (R > 1.35 * G) & (G > 1.15 * B) & (R - B > 60))
+    if xs.size < 60:
+        return None
+    P = np.stack([xs, ys], 1).astype(np.float64)
+    rng = np.random.default_rng(0)
+    best = None
+    for _ in range(200):
+        (x1, y1), (x2, y2), (x3, y3) = P[rng.choice(len(P), 3, replace=False)]
+        d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+        if abs(d) < 1e-6:
+            continue
+        s1, s2, s3 = x1 * x1 + y1 * y1, x2 * x2 + y2 * y2, x3 * x3 + y3 * y3
+        ux = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / d
+        uy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / d
+        r = np.hypot(x1 - ux, y1 - uy)
+        if not 0.15 * W < r < 0.5 * W:
+            continue
+        inl = np.abs(np.hypot(P[:, 0] - ux, P[:, 1] - uy) - r) < 2.0
+        if best is None or inl.sum() > best.sum():
+            best = inl
+    if best is None or best.sum() < 60:
+        return None
+    x, y = P[best, 0], P[best, 1]
+    A = np.stack([2 * x, 2 * y, np.ones_like(x)], 1)  # x^2 + y^2 = 2 cx x + 2 cy y + (r^2 - cx^2 - cy^2)
+    (cx, cy, k), *_ = np.linalg.lstsq(A, x * x + y * y, rcond=None)
+    r = float(np.sqrt(max(1.0, k + cx * cx + cy * cy)))
+    if r / W > 0.47 or best.sum() < 0.5 * np.pi * r:  # too big, or too little of the rim seen to trust
+        return None
+    return round(float(cx + 0.5) / W, 3), round(float(cy + 0.5) / H, 3), round(r / W, 3)
+
+
+def bright_circle(image) -> tuple[float, float, float]:
+    """The disc from where the bright pixels are (the fallback when the rim isn't found)."""
     from PIL import Image
 
     g = np.asarray(image.convert("L").resize((128, 96), Image.BILINEAR), dtype=np.float32)
@@ -289,6 +343,153 @@ def freespace_from_closeness(closeness: np.ndarray, metric_depth: np.ndarray | N
     return out
 
 
+# ============================================================ depth -> metres, anchored on the floor
+# The depth model's output is 1 / distance up to a scale and an offset that change every frame. The
+# floor's distance is known without it: Lab 5's calibrated lens (lab/fisheye_geom.py) gives every
+# pixel's ray, and a ray that points down by d (its down component) meets a floor cam_height below
+# at cam_height / d. So a straight-line fit of the output against d / cam_height on the floor gives
+# the scale and offset, and with them a distance and a height above the floor for every pixel.
+# Anything 4-45 cm tall within reach is an obstacle; its distance is where it meets the floor.
+# Checked on 188 real Pupper frames (the setup repo's depth-floor-fit branch, which used an idealized
+# lens; this uses the calibrated one): the model's output follows distance along the ray, the floor
+# fits within about 10 % out to 1 m, false "blocked" frames fell from 83 % to 57 % with the chair
+# wheel and the cable bag still caught, and the verdict flipped a third as often on a still scene.
+# Farther out the model compresses distance, so nothing beyond TRUST_M is used or reported.
+FIT_NEAR_M, FIT_FAR_M = 0.2, 1.5  # floor pixels used for the fit: where the model is known to be accurate
+TRUST_M = 1.5  # obstacles farther than this are not reported
+OBSTACLE_MIN_M = 0.04  # taller than this above the floor is an obstacle (a cable lying flat is not) ...
+OBSTACLE_SLOPE = 0.04  # ... plus this per metre away (a degree of tilt error is 1.7 cm per metre)
+OBSTACLE_MAX_M = 0.45  # higher than this is above Pupper (a table top), not in its way
+SELF_X_M, SELF_Y_M = 0.10, 0.22  # Pupper's own front legs: beside the camera, less than 10 cm ahead of it
+BIN_DEG = 2.5  # bearing bins inside the strips: an obstacle needs a few pixels in one bin, not speckle
+FIT_MIN_KEPT = 0.35  # the floor fit is used only if at least this share of the candidate floor pixels fit it ...
+FIT_MAX_RESIDUAL = 0.15  # ... with a median error under this fraction
+
+
+class FloorRays:
+    """Each pixel's ray in an n x n depth map of the disc crop, through Lab 5's calibration, and the
+    tables the floor rule needs. geom: the crop in frame pixels (x0, y0, side); size: the frame's."""
+
+    def __init__(self, n: int, geom: tuple[float, float, float], size: tuple[int, int]):
+        x0, y0, side = geom
+        t = (np.arange(n) + 0.5) / n * side
+        u = (x0 + t[None, :]) * fisheye_geom.FRAME_W / size[0]  # the calibration is for the 1400 x 1050 frame
+        v = (y0 + t[:, None]) * fisheye_geom.FRAME_H / size[1]
+        mx, my = (u - fisheye_geom.CX) / fisheye_geom.FX, (v - fisheye_geom.CY) / fisheye_geom.FY
+        a, xi = fisheye_geom.ALPHA, fisheye_geom.XI  # the double sphere model, as fisheye_geom.unproject
+        r2 = mx * mx + my * my
+        inner = 1.0 - (2.0 * a - 1.0) * r2
+        mz = (1.0 - a * a * r2) / (a * np.sqrt(np.maximum(inner, 0.0)) + 1.0 - a)
+        k = (mz * xi + np.sqrt(mz * mz + (1.0 - xi * xi) * r2)) / (mz * mz + r2)
+        x, y, z = k * mx, k * my, k * mz - xi
+        norm = np.sqrt(x * x + y * y + z * z) + 1e-12
+        right, down, fwd = x / norm, y / norm, z / norm
+        bearing = np.degrees(np.arctan2(right, fwd))  # + right, like the strips
+        off_axis = np.degrees(np.arccos(np.clip(fwd, -1.0, 1.0)))
+        use = (inner >= 0.0) & (off_axis <= fisheye_geom.H_FOV_DEG / 2) & (np.abs(bearing) <= OUTER_DEG) & circle_mask(n)
+        self.flat = np.flatnonzero(use.ravel())
+        self.f, self.r, self.d = fwd.ravel()[self.flat], right.ravel()[self.flat], down.ravel()[self.flat]
+        self.horiz = np.hypot(self.f, self.r)  # horizontal distance per metre along the ray
+        self.n_bins = int(round(2 * OUTER_DEG / BIN_DEG))
+        self.bins = np.clip(((bearing.ravel()[self.flat] + OUTER_DEG) / BIN_DEG).astype(int), 0, self.n_bins - 1)
+        centres = -OUTER_DEG + BIN_DEG * (np.arange(self.n_bins) + 0.5)
+        edges = [-OUTER_DEG, *STRIP_EDGES_DEG, OUTER_DEG]
+        self.strip_bins = [np.flatnonzero((centres >= lo) & (centres < hi)) for lo, hi in zip(edges[:-1], edges[1:])]
+        yy, xx = np.mgrid[0:n, 0:n]
+        sub = ((yy % 3 == 0) & (xx % 3 == 0)).ravel()[self.flat]  # the fit needs a few thousand pixels, not all
+        self.fit_idx = np.flatnonzero(sub & (self.d > 0.0))
+
+
+@functools.lru_cache(maxsize=4)
+def floor_rays(n: int, geom: tuple[float, float, float], size: tuple[int, int]) -> FloorRays:
+    return FloorRays(n, geom, size)  # the disc doesn't move: computed once, not per frame
+
+
+def fit_floor(closeness: np.ndarray, rays: FloorRays, cam_height_m: float) -> tuple[float, float, float, float] | None:
+    """(s, t, kept, residual): closeness = s / distance + t on the floor, or None when the floor doesn't
+    fit (hidden by things, or not flat). A trimmed least-squares fit: anything standing on the floor is
+    nearer than the floor behind it, so it only ever reads above the floor's line and is dropped."""
+    c = closeness.ravel()[rays.flat][rays.fit_idx]
+    inv = rays.d[rays.fit_idx] / cam_height_m  # the floor's 1 / distance at these pixels
+    near = (inv >= 1.0 / FIT_FAR_M) & (inv <= 1.0 / FIT_NEAR_M)
+    c, inv = c[near], inv[near]
+    if inv.size < 100:
+        return None
+    A = np.stack([inv, np.ones_like(inv)], 1)
+    keep = np.ones(inv.size, dtype=bool)
+    for _ in range(6):
+        if keep.sum() < 50:
+            return None
+        (s, t), *_ = np.linalg.lstsq(A[keep], c[keep], rcond=None)
+        res = c - (s * inv + t)
+        sig = 1.4826 * float(np.median(np.abs(res[keep]))) + 1e-6
+        keep = (res < 2.5 * sig) & (res > -4.0 * sig)
+    if s <= 0:
+        return None
+    residual = float(np.median(np.abs(res[keep]) / (s * inv[keep])))
+    kept = float(keep.mean())
+    if kept < FIT_MIN_KEPT or residual > FIT_MAX_RESIDUAL:
+        return None
+    return float(s), float(t), kept, residual
+
+
+def freespace_floor(closeness: np.ndarray, geom: tuple[float, float, float], size: tuple[int, int],
+                    cam_height_m: float = CAM_HEIGHT_STANDING_M) -> tuple[list[dict] | None, dict | None]:
+    """The five strips in freespace_from_closeness's form (name, base_deg, closest_m, nearness) from the
+    floor-anchored distances, and the fit; (None, None) when the floor doesn't fit. nearness is Lab 5's
+    row of the nearest obstacle's base, as the robot's rule (BLOCK_NEARNESS) reads it."""
+    n = closeness.shape[0]
+    rays = floor_rays(n, tuple(round(float(g), 1) for g in geom), (int(size[0]), int(size[1])))
+    fit = fit_floor(closeness, rays, cam_height_m)
+    if fit is None:
+        return None, None
+    s, t, kept, residual = fit
+    inv = (closeness.ravel()[rays.flat] - t) / s
+    dist = 1.0 / np.maximum(inv, 1.0 / 20.0)  # metres along the ray; past 20 m is "far"
+    height = cam_height_m - dist * rays.d  # above the floor
+    horiz = dist * rays.horiz
+    obstacle = ((height > OBSTACLE_MIN_M + OBSTACLE_SLOPE * horiz) & (height < OBSTACLE_MAX_M) & (horiz <= TRUST_M)
+                & ~((dist * rays.f < SELF_X_M) & (np.abs(dist * rays.r) < SELF_Y_M)))
+    # How far: the model reads a thing's face 10-25 % too far on test renders, while the floor it fits is
+    # within a few %. A pixel's ray meets the floor at or beyond the thing it passes, exactly at its base,
+    # so the nearer of the two is the base's distance for anything standing on the floor (the Lab 5 way),
+    # and the model's own distance for anything that overhangs it.
+    reach = np.minimum(horiz, np.where(rays.d > 1e-3, cam_height_m / np.maximum(rays.d, 1e-3), np.inf) * rays.horiz)
+    b, h = rays.bins[obstacle], reach[obstacle]
+    order = np.lexsort((h, b))
+    b, h = b[order], h[order]
+    starts = np.searchsorted(b, np.arange(rays.n_bins))
+    counts = np.searchsorted(b, np.arange(rays.n_bins), side="right") - starts
+    min_count = max(3, n * n // 25000)  # a few pixels of one thing, not speckle
+    k = np.maximum(min_count - 1, counts // 10)  # the nearer end of what is there, not its single nearest pixel
+    bins = np.full(rays.n_bins, np.nan)
+    ok = counts >= min_count
+    bins[ok] = h[starts[ok] + np.minimum(k[ok], counts[ok] - 1)]
+    out = []
+    for name, idx in zip(STRIPS, rays.strip_bins):
+        v = bins[idx]
+        v = v[~np.isnan(v)]
+        st = {"name": name, "base_deg": None, "closest_m": None, "nearness": None}
+        if v.size:
+            m = float(v.min())
+            base = float(np.degrees(np.arctan2(cam_height_m, m)))  # the base's angle below level, as Lab 5 measures rows
+            st.update(base_deg=round(base, 1), closest_m=round(m, 2), nearness=round((base + 90.0) / 180.0, 3))
+        out.append(st)
+    return out, {"s": round(s, 4), "t": round(t, 4), "kept": round(kept, 2), "residual": round(residual, 3)}
+
+
+def freespace_summary(closeness: np.ndarray, metric: np.ndarray | None, hfov_deg: float, mask: np.ndarray | None,
+                      cam_height_m: float, geom: tuple[float, float, float], size: tuple[int, int],
+                      method: str = "floor") -> tuple[list[dict], dict | None]:
+    """The strips to post: the floor-anchored rule (method "floor") when the disc was found and the floor
+    fits, else the base-of-surface rule; and the floor fit (None when the surface rule was used)."""
+    if method == "floor" and mask is not None:
+        strips, fit = freespace_floor(closeness, geom, size, cam_height_m)
+        if strips is not None:
+            return strips, fit
+    return freespace_from_closeness(closeness, metric, hfov_deg, mask, cam_height_m, geom, size), None
+
+
 ACCELERATED = {"cuda": "CUDAExecutionProvider", "coreml": "CoreMLExecutionProvider"}
 
 
@@ -341,7 +542,8 @@ class Depth:
         """(closeness map, metric depth map or None) at DEPTH_INPUT resolution."""
         from PIL import Image
 
-        im = image.convert("RGB").resize((self.size, self.size), Image.BILINEAR)
+        # The models' own preprocessing (their DPTImageProcessor configs): bicubic resize, ImageNet mean and std.
+        im = image.convert("RGB").resize((self.size, self.size), Image.BICUBIC)
         x = (np.asarray(im, dtype=np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
         x = x.transpose(2, 0, 1)[None]
         y = self.predict(x)
@@ -646,8 +848,10 @@ def next_period(status: dict, hz: float) -> float | None:
 class Eyes:
     def __init__(self, robot: RobotLink | None, depth: Depth | None, gemma: Gemma | None, *, hz: float,
                  describe_every: float, advertise: str, hfov_deg: float = HFOV_DEG, wb: bool = True,
-                 detector: "Detector | None" = None, source: str = "", always: bool = False):
+                 detector: "Detector | None" = None, source: str = "", always: bool = False, depth_method: str = "floor"):
         self.robot, self.depth, self.gemma, self.detector = robot, depth, gemma, detector
+        self.depth_method = depth_method  # floor (the floor-anchored rule, surface when it can't fit) or surface
+        self.depth_fit: dict | None = None  # the last frame's floor fit, for /health (None: the surface rule was used)
         self.source = source or socket.gethostname()
         self.always = always  # no gating: full rate whatever the robot is doing (for testing)
         self.state = "full"  # full | idle | standby, for /health
@@ -660,6 +864,7 @@ class Eyes:
         self.wanted: str | None = None
         self.summary: list[dict] = []
         self.circle: tuple[float, float, float] = (0.5, 0.5, 0.5)  # the fisheye's disc, found from the frames
+        self.circles: list[tuple[float, float, float]] = []  # recent disc fits: their median is used
         self.mask = circle_mask(depth.size if depth else DEPTH_INPUT)
         self.cam_height_m = CAM_HEIGHT_STANDING_M  # the robot says which (standing or lying) with each reply
         self.stats = {"frames": 0, "depth_ms": 0.0, "gemma_ms": 0.0}
@@ -672,7 +877,8 @@ class Eyes:
         if self.robot:
             self.robot.aspect = im.size[0] / max(1, im.size[1])
         if self.stats["frames"] % 50 == 1:  # the lens doesn't move: look for the disc now and then
-            self.circle = find_circle(im)
+            self.circles = (self.circles + [find_circle(im)])[-5:]
+            self.circle = tuple(float(np.median([c[i] for c in self.circles])) for i in range(3))  # one odd frame can't move it
         if self.wb:
             im = white_balance(im, self.circle)
         crop, geom = crop_to_circle(im, self.circle)
@@ -727,7 +933,8 @@ class Eyes:
                         crop, geom, size = self.crop(jpeg)
                         closeness, metric = self.depth.closeness(crop)
                         mask = self.mask if self.circle[2] < 0.5 else None
-                        self.summary = freespace_from_closeness(closeness, metric, self.hfov_deg, mask, self.cam_height_m, geom, size)
+                        self.summary, self.depth_fit = freespace_summary(closeness, metric, self.hfov_deg, mask, self.cam_height_m,
+                                                                         geom, size, self.depth_method)
                         self.stats["depth_ms"] = (time.time() - t0) * 1000
                         reply = self.robot.post_freespace(self.summary, "metric", self.advertise if self.gemma else "", self.circle,
                                                           frame_age_s=time.time() - t0, source=self.source)
@@ -851,7 +1058,7 @@ class Eyes:
             def do_GET(self):
                 if self.path.startswith("/health"):
                     self._send(200, {"ok": True, "depth": eyes.depth is not None, "gemma": eyes.gemma is not None,
-                                     "depth_model": eyes.depth.name if eyes.depth else None,
+                                     "depth_model": eyes.depth.name if eyes.depth else None, "depth_fit": eyes.depth_fit,
                                      "detector": eyes.detector is not None, "detections": eyes.detections,
                                      "state": eyes.state, "source": eyes.source,
                                      "wanted": eyes.wanted, "freespace": eyes.summary, **eyes.stats})
@@ -959,6 +1166,8 @@ def main() -> None:
     ap.add_argument("--depth-tta", action="store_true", help="average each depth map with its mirror image's: less error, twice the time (a laptop, not the Pi)")
     ap.add_argument("--metric", action="store_true", help="the depth model outputs metres (a metric-indoor export)")
     ap.add_argument("--depth-size", type=int, default=DEPTH_INPUT, help="the depth model's input in pixels (a multiple of 14; the Pi: 168)")
+    ap.add_argument("--depth-method", choices=["floor", "surface"], default="floor",
+                    help="floor: metres from fitting the depth to the floor (the base-of-surface rule when it can't fit); surface: that rule only")
     ap.add_argument("--no-depth", action="store_true")
     ap.add_argument("--detector-model", type=Path, default=DEFAULT_DETECTOR_MODEL)
     ap.add_argument("--fetch-detector-model", action="store_true", help="download the COCO detector model if it is missing (about 4 MB)")
@@ -1045,10 +1254,15 @@ def main() -> None:
             t0 = time.time()
             closeness, metric = depth.closeness(crop)
             ms = (time.time() - t0) * 1000
-            for st in freespace_from_closeness(closeness, metric, a.hfov, circle_mask(depth.size) if circle[2] < 0.5 else None,
-                                               a.cam_height, geom, im.size):
+            strips, fit = freespace_summary(closeness, metric, a.hfov, circle_mask(depth.size) if circle[2] < 0.5 else None,
+                                            a.cam_height, geom, im.size, a.depth_method)
+            print(f"  depth: floor-anchored ({100 * fit['kept']:.0f} % of the near floor fits, median error"
+                  f" {100 * fit['residual']:.0f} %)" if fit else "  depth: base-of-surface rule"
+                  + (" (the floor could not be fitted)" if a.depth_method == "floor" else ""))
+            for st in strips:
                 print(f"  {st['name']:>13}: " + ("floor only" if st["base_deg"] is None else
-                      f"surface base {st['base_deg']:5.1f} deg down the disc -> " + (
+                      (f"nearest obstacle {st['closest_m']:.2f} m" if fit else f"surface base {st['base_deg']:5.1f} deg down the disc")
+                      + " -> " + (
                           "no Lab 5 row (outside the lens calibration)" if st["nearness"] is None else
                           f"Lab 5 row {st['nearness']:.3f} ({'blocked' if st['nearness'] >= 0.68 else 'clear'})")))
             print(f"  ({depth.name}, {ms:.0f} ms; blocked when the base's Lab 5 row >= 0.68 of the image; the stop row is 0.794: lab/fisheye_geom.py)")
@@ -1059,7 +1273,8 @@ def main() -> None:
         return
 
     eyes = Eyes(RobotLink(a.robot), depth, gemma, hz=a.hz, describe_every=a.describe_every, advertise=a.advertise,
-                hfov_deg=a.hfov, wb=not a.no_white_balance, detector=detector, source=a.source, always=a.always)
+                hfov_deg=a.hfov, wb=not a.no_white_balance, detector=detector, source=a.source, always=a.always,
+                depth_method=a.depth_method)
     eyes.serve(a.port)
     log.info("serving /look on port %d (robot reaches it at %s); frames from %s", a.port, a.advertise, a.robot)
     threading.Thread(target=eyes.gemma_loop, daemon=True).start()

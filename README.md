@@ -405,12 +405,44 @@ the same network (fast) or on the Pi (slower). A few times a second it fetches t
 server already serves (`GET /camera/image`), runs a monocular depth model on it (Distill-Any-Depth
 Small, ONNX, CPU; see *The depth model* below) and posts a *free-space summary* to `POST /vision/freespace`: for five strips of
 the view cut by bearing (within 15 degrees of straight on, 15 to 45, and 45 to 80 on each side),
-where the nearest thing standing on the floor meets the floor. The depth model's output is relative
-(an unknown scale and offset), so the distance comes from geometry, not from the model's numbers: on
-an empty floor the closeness falls steadily going up the image, and anything standing on the floor
-is a run of rows with about the same closeness (a vertical surface) sitting on that curve. In each
-strip the eyes service finds the lowest such run, the nearest surface (a near leg in front of a far
-wall is the leg), and posts where its base is.
+where the nearest thing standing on the floor meets the floor.
+
+The depth model's output is relative: 1 / distance, up to a scale and an offset that change every
+frame. The floor's distance is known without the model. Lab 5's calibrated lens
+(`lab/fisheye_geom.py`) gives every pixel's ray, so a ray pointing down meets a floor `cam_height`
+below at a known distance. The eyes service fits the model's output to the visible floor (a trimmed
+straight-line fit, 0.2-1.5 m), which turns every pixel into metres and a height above the floor
+(`freespace_floor`).
+
+- **What counts as an obstacle:** 4-45 cm above the floor, within 1.5 m. A cable lying flat doesn't
+  count, and neither do Pupper's own front paws.
+- **How far it is:** the nearer of the model's distance and where that pixel's ray meets the floor.
+  For anything standing on the floor, that is its base: Lab 5's way of measuring, which doesn't
+  depend on the model's depth. Something overhanging, like a shelf, is measured by the model's
+  distance.
+- **When the floor can't be fitted** (none in view, nothing flat), the older rule answers instead.
+  It finds, in each strip, the lowest run of rows with about the same closeness (a vertical surface
+  rising from the floor) and posts where its base is. `--depth-method surface` uses only that rule.
+- **The disc:** the eyes find the fisheye's disc from the lens's orange rim, and use the median of
+  recent fits. The older bright-pixel finder, still the fallback, counted ceiling glare as part of
+  the picture and put the disc about 6 % too high, which cut the nearest floor off the crop.
+- **Checking it:** `curl localhost:8100/health` shows the last floor fit (`depth_fit`: the share of
+  floor pixels that fit, and the median error; `null` when the older rule answered).
+
+How the floor fit was checked:
+
+- **On real frames:** this rule comes from the setup repo's `depth-floor-fit` branch, checked on 188
+  real Pupper frames. False "blocked" frames fell from 83 % to 57 %; a chair wheel at 0.21 m and a
+  cable bag at 0.4 m were still caught; the verdict flipped a third as often on a still scene. That
+  branch used an idealized lens; this one uses Lab 5's calibrated lens and the base distance above.
+- **On rendered Pupper-view frames** (a floor, walls, a box at a known distance):
+  - the floor fits within a few %;
+  - a box at 0.20-0.30 m reads 0.25-0.33 m and blocks;
+  - from 0.35 m out, readings run 5-25 % far, because the bottom 4-5 cm of a thing counts as floor.
+
+  Both models behave about the same there.
+- **Not yet checked:** distances against a tape measure on the robot. Do that before relying on it
+  (*Before relying on it* below).
 
 The rule lives in `lab/hackathon_vision.py`, next to the detector's: `path_blocked` refuses or stops
 a move when the depth sense shows something in its way, naming it if the detector can ("a chair"),
@@ -530,11 +562,16 @@ Two options, both off by default:
 int8 quantization was tried and rejected: it is 25-35 % faster but loses whole far regions at 224 px.
 Depth Anything 3 Small is about 3x the work a frame, too slow for the Pi.
 
-**Before relying on it, re-check the threshold on the robot.** `BLOCK_NEARNESS` was set with the
-old model. Grab a frame (below) and run `--image` once with each model:
-`python3 vision/eyes.py --image frame.jpg --no-gemma` and the same with
-`--depth-model-name depth-anything-v2-small`. An empty floor should stay clear and a chair leg
-30-40 cm ahead should block with the new model too.
+**Before relying on it, check it on the robot with a tape measure.** `BLOCK_NEARNESS` (Lab 5 row
+0.68, about 0.35 m standing) was set with the older model and rule. No motion is needed: with Pupper
+standing still, put a chair leg 25, 35 and 60 cm ahead and grab a frame for each (below). Then run:
+
+- `python3 vision/eyes.py --image frame.jpg --no-gemma` (it prints each strip's distance and whether
+  it blocks);
+- the same with `--depth-method surface` (the older rule);
+- the same with `--depth-model-name depth-anything-v2-small` (the older model).
+
+An empty floor should stay clear, and the leg at 25 cm should block.
 
 To check the threshold on a new robot or room, grab a frame with
 `curl localhost:8000/camera/image -o frame.jpg` and run `python3 vision/eyes.py --image frame.jpg`:
