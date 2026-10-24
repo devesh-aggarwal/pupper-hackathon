@@ -1,0 +1,722 @@
+#!/usr/bin/env python3
+"""Pupper's brain on a local Gemma: it hears, talks, decides and calls tools, with no cloud in the loop.
+
+The hackathon's rule is "on-device, no cloud", and the web app's brain, Gemini Live, is cloud. This
+replaces it. It is robot/gemini_chat.py's loop with Gemma in Ollama instead of Gemini, plus a voice:
+the same prompt and tools (GET /tools), every call sent to the robot server (POST /tools/<name>),
+and its {success, message} given back to Gemma word for word.
+
+    python3 robot/gemma_brain.py --check               # can the Pi reach Gemma (and whisper) on the Jetson?
+    python3 robot/gemma_brain.py                       # type to Gemma: your tools on a fake robot (nothing moves)
+    python3 robot/gemma_brain.py --robot               # type to Gemma: the real robot server (it moves!)
+    python3 robot/gemma_brain.py --robot --voice       # talk to Pupper: mic, whisper, Gemma, Piper (it moves!)
+
+Where things run (the README's "Gemma on the Jetson" has the setup):
+  the Pi      this script, the robot server (localhost:8000), the mic, the speaker, Piper (speech)
+  the Jetson  Ollama with Gemma (10.10.10.1:11434) and whisper.cpp's server (10.10.10.1:8080),
+              on the Ethernet cable between the two (jetson/link.sh), listening on nothing else
+The robot server stays on the Pi's localhost, so nothing on the network can move the robot.
+
+Gemma calls tools natively (Ollama's tools), or, with a model or an Ollama that can't, by naming
+them in a JSON reply (--tools json); auto tries native first and falls back. Robot events (a
+reminder came due, a loud sound, a search finished) become turns of their own, so Pupper speaks
+up without being asked, as it does with Gemini. Saying just "stop" stops the robot at once,
+without waiting for Gemma.
+"""
+
+from __future__ import annotations
+
+import argparse
+import array
+import asyncio
+import base64
+import collections
+import io
+import json
+import math
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+import wave
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from gemini_chat import DeskBackend, RobotBackend  # noqa: E402  the same two robots Gemini's chat talks to
+
+JETSON = os.environ.get("PUPPER_JETSON", "10.10.10.1")  # its address on the cable (jetson/link.sh)
+OLLAMA_URL = os.environ.get("PUPPER_OLLAMA", f"http://{JETSON}:11434")
+WHISPER_URL = os.environ.get("PUPPER_WHISPER", f"http://{JETSON}:8080")
+PIPER_VOICE = Path(os.environ.get("PUPPER_PIPER_VOICE", Path.home() / ".local/share/piper/en_US-lessac-medium.onnx"))
+# Without --model, the first of these that Ollama has: the biggest Gemma first. Thor runs the
+# 26B (a mixture of experts, 4B active per token: fast, and much the best at picking tools); an
+# 8 GB Orin Nano has room for e2b and whisper, not e4b (6.6 GB) as well.
+PREFERRED = ("gemma4:26b-a4b", "gemma4:26b", "gemma4:12b", "gemma4:e4b", "gemma4", "gemma4:e2b",
+             "gemma3:12b", "gemma3:4b")
+NUM_CTX = 16384  # the prompt and 30 tools are about 8k tokens: Ollama's default context would cut them off
+MAX_ROUNDS = 6   # tool calls in a row before Gemma has to answer
+KEEP = 30        # messages of history kept (older ones are dropped, a turn at a time)
+STOP_WORDS = re.compile(r"^\W*(?:(?:hey\W+)?pupper\W+)?(?:stop|halt|freeze)(?:\W+(?:it|now|pupper))*\W*$", re.I)
+
+VOICE_RULES = (
+    "How you talk here: everything you write is read out loud by a speech synthesizer, so write short, "
+    "plain spoken sentences: no markdown, no lists, no emoji, no stage directions. To make the robot do "
+    "something, call the tool; never only say that you will. After a tool replies, tell the person what "
+    "really happened, from the reply. Messages from the robot's own systems (a reminder, a sound it "
+    "heard, a search that finished) say so: answer those out loud too, as Pupper.")
+
+
+# ============================================================ tools, in Ollama's terms
+def json_schema(s):
+    """Gemini's schema (type: OBJECT, STRING, ...) as the JSON Schema Ollama wants (object, string, ...)."""
+    if isinstance(s, dict):
+        return {k: v.lower() if k == "type" and isinstance(v, str) else json_schema(v) for k, v in s.items()}
+    if isinstance(s, list):
+        return [json_schema(v) for v in s]
+    return s
+
+
+def ollama_tools(decls: list[dict]) -> list[dict]:
+    return [{"type": "function", "function": {
+        "name": d["name"], "description": d.get("description", ""),
+        "parameters": json_schema(d.get("parameters") or {"type": "OBJECT", "properties": {}})}} for d in decls]
+
+
+def coerce_args(decl: dict | None, args) -> dict:
+    """Small models send "1.5" for 1.5, 2.0 for 2 and null for "not given": fix what is unambiguous,
+    by the declaration. The robot checks everything else and says what was wrong."""
+    props = ((decl or {}).get("parameters") or {}).get("properties") or {}
+    out = {}
+    for k, v in (args if isinstance(args, dict) else {}).items():
+        if v is None:
+            continue
+        t = str((props.get(k) or {}).get("type", "")).lower()
+        if isinstance(v, str) and t in ("number", "integer"):
+            try:
+                v = float(v.strip())
+            except ValueError:
+                pass
+        if isinstance(v, str) and t == "boolean" and v.strip().lower() in ("true", "false"):
+            v = v.strip().lower() == "true"
+        if t == "integer" and isinstance(v, float) and v.is_integer():
+            v = int(v)
+        out[k] = v
+    return out
+
+
+def native_calls(msg: dict) -> list[tuple[str, dict]]:
+    calls = []
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {}
+        if fn.get("name"):
+            calls.append((fn["name"], args if isinstance(args, dict) else {}))
+    return calls
+
+
+FENCE = re.compile(r"```[a-z_]*\s*(.*?)```", re.S)
+
+
+def calls_in_text(text: str, names) -> tuple[str, list[tuple[str, dict]]]:
+    """A call written out instead of made (small models do this): {"name": "move", "arguments": {...}}
+    as the whole reply, or in a ``` fence. Returns the words without it, and the calls."""
+    candidates = [(m.group(1), m.group(0)) for m in FENCE.finditer(text)] + [(text, text)]
+    for body, whole in candidates:
+        try:
+            data = json.loads(body.strip())
+        except ValueError:
+            continue
+        items = data if isinstance(data, list) else [data]
+        calls = []
+        for it in items:
+            if isinstance(it, dict) and it.get("name") in names:
+                args = it.get("arguments", it.get("args", it.get("parameters", {})))
+                calls.append((it["name"], args if isinstance(args, dict) else {}))
+        if calls and len(calls) == len(items):
+            return text.replace(whole, "").strip(), calls
+    return text, []
+
+
+def reply_schema(names: list[str]) -> dict:
+    """--tools json: every reply is {say, calls}, enforced by Ollama's structured output."""
+    return {"type": "object", "required": ["say", "calls"], "properties": {
+        "say": {"type": "string"},
+        "calls": {"type": "array", "items": {"type": "object", "required": ["name", "args"], "properties": {
+            "name": {"type": "string", "enum": names}, "args": {"type": "object"}}}}}}
+
+
+def json_mode_prompt(decls: list[dict]) -> str:
+    lines = ['Reply with JSON only, always in this form: {"say": "what you say out loud, or empty", '
+             '"calls": [{"name": "a tool", "args": {...}}]}. calls is [] when you only talk. After calls you '
+             "get their results, and reply again in the same form. The tools:"]
+    for d in decls:
+        params = (d.get("parameters") or {})
+        required = set(params.get("required") or [])
+        lines.append(f"- {d['name']}: {d.get('description', '')}")
+        for k, p in (params.get("properties") or {}).items():
+            enum = f" One of: {', '.join(map(str, p['enum']))}." if p.get("enum") else ""
+            lines.append(f"    {k} ({str(p.get('type', '')).lower()}{', required' if k in required else ''}): "
+                         f"{p.get('description', '')}{enum}")
+    return "\n".join(lines)
+
+
+def clean_speech(text: str) -> str:
+    """What the synthesizer should read: no markdown marks, one line."""
+    return " ".join(re.sub(r"[*_#`>]+", "", text or "").split())
+
+
+# ============================================================ Gemma, in Ollama on the Jetson
+class OllamaError(RuntimeError):
+    pass
+
+
+class Ollama:
+    def __init__(self, url: str, model: str, num_ctx: int = NUM_CTX, timeout: float = 180.0):
+        self.url, self.model, self.num_ctx, self.timeout = url.rstrip("/"), model, num_ctx, timeout
+        self.think: bool | None = False  # Gemma 4 thinks first unless told not to: slow. None: don't say
+        self.last: dict = {}  # the last reply, for its timings
+
+    def _req(self, path: str, body: dict | None = None, timeout: float | None = None) -> dict:
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.url + path, data=data,
+                                     headers={"Content-Type": "application/json"} if data else {})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            raise OllamaError(f"Ollama said {e.code}: {e.read().decode(errors='replace')[:300]}") from None
+
+    def models(self) -> list[str]:
+        return [m.get("name", "") for m in self._req("/api/tags", timeout=5).get("models", [])]
+
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, fmt: dict | None = None) -> dict:
+        # keep_alive -1: stay loaded (a reload is 10-30 s); num_ctx must match what the eyes'
+        # requests get (OLLAMA_CONTEXT_LENGTH, jetson/setup.sh), or Ollama reloads between them.
+        body = {"model": self.model, "messages": messages, "stream": False, "keep_alive": -1,
+                "options": {"num_ctx": self.num_ctx, "temperature": 0.3}}
+        if self.think is not None:
+            body["think"] = self.think
+        if tools:
+            body["tools"] = tools
+        if fmt:
+            body["format"] = fmt
+        try:
+            self.last = self._req("/api/chat", body)
+        except OllamaError as e:
+            if "think" in str(e).lower() and self.think is not None:  # this model can't be told: don't
+                self.think = None
+                return self.chat(messages, tools, fmt)
+            raise
+        return self.last.get("message") or {}
+
+
+def pick_model(names: list[str]) -> str | None:
+    for want in PREFERRED:
+        for n in names:
+            if n == want or n == want + ":latest" or n.startswith(want + "-"):
+                return n
+    return next((n for n in names if n.startswith("gemma")), None)
+
+
+# ============================================================ the loop
+class Brain:
+    """One conversation with Gemma: a turn goes in, Gemma talks and calls tools until it is done."""
+
+    def __init__(self, llm: Ollama, prompt: str, decls: list[dict], backend, say, mode: str = "auto",
+                 keep: int = KEEP, log=print):
+        self.llm, self.backend, self.say, self.log, self.keep = llm, backend, say, log, keep
+        self.prompt, self.mode = prompt, mode  # auto: native, until Ollama says this model can't
+        self.decls = {d["name"]: d for d in decls}
+        self.tools = ollama_tools(decls)
+        self.history: list[dict] = []
+
+    def system(self) -> dict:
+        text = VOICE_RULES + "\n\n" + self.prompt
+        if self.mode == "json":
+            text += "\n\n" + json_mode_prompt(list(self.decls.values()))
+        return {"role": "system", "content": text}
+
+    async def turn(self, text: str, image: bytes | None = None) -> None:
+        for m in self.history:
+            m.pop("images", None)  # only the newest frame is worth its tokens
+        msg = {"role": "user", "content": text}
+        if image:
+            msg["images"] = [base64.b64encode(image).decode()]
+        self.history.append(msg)
+        try:
+            for _ in range(MAX_ROUNDS):
+                t0 = time.time()
+                said, calls, native = await asyncio.to_thread(self._ask)
+                self.log(f"  (Gemma: {time.time() - t0:.1f} s)")
+                if said:
+                    self.say(said)  # queued: the robot acts while Pupper talks
+                if not calls:
+                    break
+                results = []
+                for name, args in calls:
+                    args = coerce_args(self.decls.get(name), args)
+                    self.log(f"  -> Gemma calls {name}({json.dumps(args)})")
+                    try:
+                        result = await self.backend.call(name, args)
+                    except Exception as e:  # e.g. the robot server is not running
+                        result = {"success": False, "message": f"{type(e).__name__}: {e}"}
+                    self.log(f"  <- reply Gemma hears now: {json.dumps(result)}")
+                    if hasattr(self.backend, "after"):
+                        self.backend.after()
+                    results.append((name, result))
+                self._add_results(results, native)
+            else:
+                self.log(f"  (Gemma called tools {MAX_ROUNDS} times in a row: stopped there)")
+        except (OllamaError, urllib.error.URLError, OSError) as e:
+            self.log(f"  !! Gemma did not answer: {e}")
+            self.say("Sorry, my brain isn't answering right now.")
+        self._trim()
+
+    def _ask(self) -> tuple[str, list[tuple[str, dict]], bool]:
+        """One reply from Gemma: (what to say, the calls, whether they were native tool calls)."""
+        messages = [self.system()] + self.history
+        if self.mode in ("auto", "native"):
+            try:
+                m = self.llm.chat(messages, tools=self.tools)
+            except OllamaError as e:
+                if self.mode == "auto" and "does not support tools" in str(e):
+                    self.log(f"  ({self.llm.model} can't call tools natively here: switching to JSON replies)")
+                    self.mode = "json"
+                    return self._ask()
+                raise
+            content = (m.get("content") or "").strip()
+            calls, native = native_calls(m), True
+            if not calls:
+                content, calls = calls_in_text(content, self.decls)
+                native = False
+            reply = {"role": "assistant", "content": m.get("content") or ""}
+            if m.get("tool_calls"):
+                reply["tool_calls"] = m["tool_calls"]
+            self.history.append(reply)
+            return clean_speech(content), calls, native
+        m = self.llm.chat(messages, fmt=reply_schema(sorted(self.decls)))
+        raw = m.get("content") or ""
+        self.history.append({"role": "assistant", "content": raw})
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return clean_speech(raw), [], False
+        calls = [(c["name"], c.get("args") or {}) for c in (data.get("calls") or [])
+                 if isinstance(c, dict) and c.get("name")]
+        return clean_speech(str(data.get("say") or "")), calls, False
+
+    def _add_results(self, results: list[tuple[str, dict]], native: bool) -> None:
+        if native:
+            for name, result in results:
+                self.history.append({"role": "tool", "tool_name": name, "content": json.dumps(result)})
+            return
+        # Calls Gemma wrote out (or JSON mode): the results go back as a message it can read.
+        self.history.append({"role": "user", "content": "[tool results, from the robot] " + "; ".join(
+            f"{name} -> {json.dumps(result)}" for name, result in results)
+            + (" Reply in the same JSON form." if self.mode == "json" else " Now tell the person what happened.")})
+
+    def _trim(self) -> None:
+        if len(self.history) > self.keep:
+            h = self.history[-self.keep:]
+            while h and h[0]["role"] != "user":  # never start on a tool reply
+                h = h[1:]
+            self.history = h
+
+
+# ============================================================ what the robot has to say
+def _post(backend, path: str, payload: dict | None = None) -> dict:
+    req = urllib.request.Request(backend.url + path, data=json.dumps(payload or {}).encode(),
+                                 headers={"content-type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+
+def news(backend) -> list[str]:
+    """What the robot has to tell Gemma since the last look: events (GET /events), and, on the real
+    robot, reminders that came due (the web app claims and delivers them; with no web app, we do)."""
+    out = []
+    for ev in backend.events():
+        print(f"  [event {ev['kind']}] {ev['text']}" + (f"  (screen: {ev['display']['text']})" if ev.get("display") else ""))
+        if ev.get("for_gemini"):
+            out.append(ev["for_gemini"])
+    if isinstance(backend, RobotBackend):
+        for r in _post(backend, "/reminders/claim?min_late_s=0").get("due", []):
+            print(f"  [reminder #{r['id']}] {r['message']}")
+            out.append(r["announce"])
+            _post(backend, f"/reminders/{r['id']}/delivered", {"how": "gemma"})
+    return out
+
+
+def transcript(backend, who: str, text: str) -> None:
+    """The session log (lab/hackathon_log.py) gets what was said, as it does from the web app."""
+    if isinstance(backend, RobotBackend) and text:
+        try:
+            _post(backend, "/transcript", {"who": who, "text": text})
+        except (urllib.error.URLError, OSError):
+            pass
+
+
+def camera_frame(backend) -> bytes | None:
+    if not isinstance(backend, RobotBackend):
+        return None
+    try:
+        with urllib.request.urlopen(backend.url + "/camera/image", timeout=3) as r:
+            return r.read() if r.status == 200 else None
+    except (urllib.error.URLError, OSError):
+        return None
+
+
+# ============================================================ ears and voice (on the Pi)
+class Endpointer:
+    """Cuts 16-bit mono audio into utterances by loudness over the room's own floor.
+
+    The floor follows the quiet frames (it drops at once and rises slowly), so it holds in a quiet
+    lab and in a loud hackathon hall. Speech starts after start_s of frames start_db over the
+    floor and ends after end_s back under it; pre_s of audio before the start is kept, so the
+    first syllable isn't cut. Utterances shorter than min_s (a cough, a clack) are dropped."""
+
+    def __init__(self, rate: int = 16000, frame_ms: int = 30, start_db: float = 10.0, start_s: float = 0.15,
+                 end_s: float = 0.8, min_s: float = 0.4, max_s: float = 15.0, pre_s: float = 0.3):
+        self.frame_s = frame_ms / 1000
+        self.frame_bytes = int(rate * self.frame_s) * 2
+        self.start_db, self.start_s, self.end_s, self.min_s, self.max_s = start_db, start_s, end_s, min_s, max_s
+        self.pre_frames = max(1, round(pre_s / self.frame_s))
+        self.floor: float | None = None
+        self.reset()
+
+    def reset(self) -> None:
+        self.pre: collections.deque = collections.deque(maxlen=self.pre_frames)
+        self.buf: list[bytes] = []
+        self.loud_run = self.quiet_run = 0
+        self.speaking = False
+
+    @staticmethod
+    def level_db(frame: bytes) -> float:
+        a = array.array("h", frame)
+        if sys.byteorder == "big":
+            a.byteswap()
+        rms = math.sqrt(sum(x * x for x in a) / max(1, len(a))) / 32768.0
+        return 20 * math.log10(rms) if rms > 1e-5 else -100.0
+
+    def feed(self, frame: bytes) -> bytes | None:
+        """One frame in; an utterance out when one just ended, else None."""
+        db = self.level_db(frame)
+        if self.floor is None:
+            self.floor = db
+        if not self.speaking:
+            self.floor = db if db < self.floor else self.floor + 0.02 * (db - self.floor)
+            self.pre.append(frame)
+            self.loud_run = self.loud_run + 1 if db > self.floor + self.start_db else 0
+            if self.loud_run * self.frame_s >= self.start_s:
+                self.speaking, self.buf, self.quiet_run = True, list(self.pre), 0
+            return None
+        self.buf.append(frame)
+        self.quiet_run = self.quiet_run + 1 if db < self.floor + self.start_db - 3 else 0
+        length = len(self.buf) * self.frame_s
+        if self.quiet_run * self.frame_s >= self.end_s or length >= self.max_s:
+            pcm, speech_s = b"".join(self.buf), length - self.quiet_run * self.frame_s
+            self.reset()
+            return pcm if speech_s >= self.min_s else None
+        return None
+
+
+class Mic:
+    """The mic through arecord (16 kHz mono, the PipeWire default unless --mic says otherwise)."""
+
+    def __init__(self, device: str = "default", rate: int = 16000):
+        self.device, self.rate = device, rate
+
+    def run(self, on_utterance, muted) -> None:
+        """Blocks: calls on_utterance(pcm) for each utterance, ignoring the mic while muted() is true."""
+        ep = Endpointer(self.rate)
+        cmd = ["arecord", "-q", "-D", self.device, "-f", "S16_LE", "-r", str(self.rate), "-c", "1", "-t", "raw"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        try:
+            while True:
+                chunk = proc.stdout.read(ep.frame_bytes)
+                if len(chunk) < ep.frame_bytes:
+                    break
+                if muted():  # Pupper is talking: don't transcribe its own voice
+                    ep.reset()
+                    continue
+                pcm = ep.feed(chunk)
+                if pcm:
+                    on_utterance(pcm)
+        finally:
+            proc.kill()
+        print(f"!! the mic stopped (arecord -D {self.device}): is another program holding it?", flush=True)
+        os._exit(1)  # a brain with no ears must not sit there looking alive
+
+
+def to_wav(pcm: bytes, rate: int) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def multipart(fields: dict[str, str], file_field: str, filename: str, data: bytes, ctype: str) -> tuple[bytes, str]:
+    boundary = uuid.uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+             for k, v in fields.items()]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+                 f"Content-Type: {ctype}\r\n\r\n".encode() + data + b"\r\n")
+    return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
+def clean_heard(text: str) -> str:
+    """whisper's words without its notes ([BLANK_AUDIO], (music)); "" if nothing was said."""
+    text = " ".join(re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", " ", text or "").split())
+    return text if re.search(r"[A-Za-z]", text) else ""
+
+
+class Whisper:
+    """Speech to text: whisper.cpp's server (whisper-server) on the Jetson, POST /inference."""
+
+    def __init__(self, url: str, timeout: float = 30.0):
+        self.url, self.timeout = url.rstrip("/"), timeout
+
+    def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
+        body, ctype = multipart({"response_format": "json", "temperature": "0.0"},
+                                "file", "speech.wav", to_wav(pcm, rate), "audio/wav")
+        req = urllib.request.Request(self.url + "/inference", data=body, headers={"Content-Type": ctype})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return clean_heard(json.loads(r.read().decode()).get("text", ""))
+
+
+class Speaker:
+    """Says things out loud one at a time, in a thread of its own, so the robot acts while Pupper talks.
+
+    piper (a neural voice, fast on the Pi 5) when it and its voice are installed, else espeak-ng,
+    else it only prints."""
+
+    def __init__(self, engine: str = "auto", piper_voice: Path = PIPER_VOICE, device: str | None = None):
+        local = Path.home() / ".local/bin/piper"  # pip install --user puts it here, often not on the PATH
+        self.piper = shutil.which("piper") or (str(local) if local.exists() else "piper")
+        if engine == "auto":
+            engine = ("piper" if Path(self.piper).exists() and Path(piper_voice).exists()
+                      else "espeak" if shutil.which("espeak-ng") else "print")
+        self.engine, self.piper_voice, self.device = engine, Path(piper_voice), device
+        self.q: queue.Queue = queue.Queue()
+        self.speaking = threading.Event()
+        self.quiet_until = 0.0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def say(self, text: str) -> None:
+        self.q.put(text)
+
+    def busy(self) -> bool:
+        return self.speaking.is_set() or not self.q.empty() or time.time() < self.quiet_until
+
+    def _run(self) -> None:
+        while True:
+            text = self.q.get()
+            self.speaking.set()
+            try:
+                self._speak(text)
+            except (OSError, subprocess.CalledProcessError) as e:
+                print(f"  (speech failed: {e})")
+            finally:
+                if self.q.empty():
+                    self.quiet_until = time.time() + 0.4  # the room's echo of the last word
+                    self.speaking.clear()
+
+    def _speak(self, text: str) -> None:
+        aplay = ["aplay", "-q"] + (["-D", self.device] if self.device else [])
+        if self.engine == "piper":
+            with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+                subprocess.run([self.piper, "-m", str(self.piper_voice), "-f", f.name], input=text.encode(),
+                               check=True, capture_output=True)
+                subprocess.run(aplay + [f.name], check=True)
+        elif self.engine == "espeak":
+            subprocess.run(["espeak-ng", "-s", "165", text], check=True, capture_output=True)
+
+
+# ============================================================ talking to Pupper
+async def type_loop(brain: Brain, backend) -> None:
+    print("Type to Pupper ('quit' to exit). Robot events come in with your next line.\n")
+    while True:
+        user = (await asyncio.to_thread(input, "You > ")).strip()
+        if user.lower() in ("quit", "exit"):
+            return
+        text = "\n".join(await asyncio.to_thread(news, backend) + ([user] if user else []))
+        if text:
+            await brain.turn(text)
+
+
+async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Speaker, camera: bool) -> None:
+    """The mic (a thread) cuts utterances; whisper (another thread) turns them into words; robot
+    news is polled every second; each goes to Gemma as a turn, one at a time, in order."""
+    loop = asyncio.get_running_loop()
+    inbox: asyncio.Queue = asyncio.Queue()
+    heard: queue.Queue = queue.Queue()
+
+    def listen() -> None:
+        while True:
+            pcm = heard.get()
+            try:
+                text = stt.transcribe(pcm, mic.rate)
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                print(f"  !! whisper did not answer: {e}")
+                continue
+            if not text:
+                continue
+            if STOP_WORDS.match(text):  # "stop" doesn't wait for Gemma
+                print("  [stop heard: stopping now]")
+                asyncio.run_coroutine_threadsafe(backend.call("stop", {}), loop)
+            loop.call_soon_threadsafe(inbox.put_nowait, ("person", text))
+
+    async def poll_news() -> None:
+        while True:
+            try:
+                for text in await asyncio.to_thread(news, backend):
+                    inbox.put_nowait(("robot", text))
+            except (urllib.error.URLError, OSError) as e:
+                print(f"  !! the robot server did not answer: {e}")
+            await asyncio.sleep(1.0)
+
+    threading.Thread(target=mic.run, args=(heard.put, speaker.busy), daemon=True).start()
+    threading.Thread(target=listen, daemon=True).start()
+    asyncio.create_task(poll_news())
+    print("Listening. Talk to Pupper (Ctrl+C to stop).\n")
+    while True:
+        items = [await inbox.get()]
+        while not inbox.empty():  # whatever piled up while Gemma was busy goes in as one turn
+            items.append(inbox.get_nowait())
+        for who, text in items:
+            if who == "person":
+                print(f"You > {text}")
+                transcript(backend, "person", text)
+        image = await asyncio.to_thread(camera_frame, backend) if camera else None
+        await brain.turn("\n".join(text for _, text in items), image)
+
+
+# ============================================================ checks, and main
+def check(ollama_url: str, whisper_url: str, model: str | None) -> int:
+    """Is everything on the Jetson reachable from here, and can its Gemma call a tool?"""
+    print(f"Ollama at {ollama_url} ... ", end="", flush=True)
+    try:
+        names = Ollama(ollama_url, "").models()
+    except (OllamaError, urllib.error.URLError, OSError) as e:
+        print(f"unreachable ({e}).\n  Is the cable's link up (jetson/link.sh status, on both) and Ollama"
+              " listening on it (jetson/setup.sh)?")
+        return 1
+    print("ok: " + (", ".join(names) or "no models"))
+    chosen = model or pick_model(names)
+    if not chosen:
+        print("  No Gemma pulled. On the Jetson: ollama pull gemma4:26b (Thor) or gemma4:e2b-it-qat (Orin Nano)")
+        return 1
+    llm = Ollama(ollama_url, chosen)
+    t0 = time.time()
+    try:
+        m = llm.chat([{"role": "user", "content": "Say hello in five words."}])
+        print(f"  {chosen} talks ({time.time() - t0:.1f} s, the first call loads it): {m.get('content', '').strip()[:80]!r}")
+        t0 = time.time()
+        tool = [{"name": "stand_up", "description": "Stand up, ready to walk."}]
+        m = llm.chat([{"role": "user", "content": "Please stand up."}], tools=ollama_tools(tool))
+        calls = native_calls(m) or calls_in_text(m.get("content") or "", {"stand_up"})[1]
+        print(f"  tool calls ({time.time() - t0:.1f} s): " + ("native, ok" if native_calls(m) else
+              "written out as text (--tools auto copes)" if calls else
+              f"none ({(m.get('content') or '').strip()[:60]!r}); try --tools json"))
+    except OllamaError as e:
+        print(f"  {chosen}: {e}" + ("  (--tools auto falls back to JSON replies)" if "does not support tools" in str(e) else ""))
+    print(f"whisper at {whisper_url} ... ", end="", flush=True)
+    try:
+        urllib.request.urlopen(whisper_url, timeout=3).close()
+        print("ok")
+    except (urllib.error.URLError, OSError) as e:
+        print(f"unreachable ({e}): only --voice needs it")
+    return 0
+
+
+async def run(args, model: str) -> None:
+    backend = RobotBackend(args.robot) if args.robot else DeskBackend()
+    prompt, decls = backend.setup()
+    if args.only:
+        wanted = [n.strip() for n in args.only.split(",") if n.strip()]
+        unknown = sorted(set(wanted) - {d["name"] for d in decls})
+        if unknown:
+            sys.exit(f"--only: no tool {unknown}; the tools are {sorted(d['name'] for d in decls)}")
+        decls = [d for d in decls if d["name"] in wanted]
+    if args.show:
+        print("=== What Gemma reads: the prompt ===\n" + VOICE_RULES + "\n\n" + prompt + "\n")
+        print("=== ... and the tools ===\n" + json.dumps(ollama_tools(decls), indent=2) + "\n")
+    print(f"Gemma: {model} at {args.ollama}, with {backend.name}.")
+    print(f"Its {len(decls)} tools: " + ", ".join(d["name"] for d in decls))
+
+    llm = Ollama(args.ollama, model, args.num_ctx)
+    if args.voice:
+        speaker = Speaker(args.tts, args.piper_voice, args.speaker)
+        print(f"Voice: {speaker.engine}; ears: whisper at {args.whisper}; mic: {args.mic}")
+
+        def say(text: str) -> None:
+            print(f"Pupper > {text}")
+            speaker.say(text)
+            transcript(backend, "pupper", text)
+
+        brain = Brain(llm, prompt, decls, backend, say, args.tools)
+        await voice_loop(brain, backend, Mic(args.mic), Whisper(args.whisper), speaker, args.camera)
+    else:
+        brain = Brain(llm, prompt, decls, backend, lambda text: print(f"Pupper > {text}"), args.tools)
+        await type_loop(brain, backend)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--robot", nargs="?", const="http://localhost:8000", metavar="URL",
+                    help="the real robot server (default http://localhost:8000): Pupper moves!")
+    ap.add_argument("--voice", action="store_true", help="talk and listen (mic, whisper, Piper) instead of typing")
+    ap.add_argument("--check", action="store_true", help="check the Jetson's Ollama and whisper from here, and exit")
+    ap.add_argument("--ollama", default=OLLAMA_URL, help=f"Ollama on the Jetson (default {OLLAMA_URL}; $PUPPER_OLLAMA)")
+    ap.add_argument("--model", default=os.environ.get("PUPPER_GEMMA"),
+                    help="the Gemma in Ollama (default: the biggest one it has; $PUPPER_GEMMA)")
+    ap.add_argument("--tools", choices=["auto", "native", "json"], default="auto",
+                    help="how Gemma calls tools: Ollama's tools, or JSON replies (auto: native, JSON if it can't)")
+    ap.add_argument("--only", help="comma-separated tool names to declare (a small model picks better from fewer)")
+    ap.add_argument("--num-ctx", type=int, default=NUM_CTX, help=f"Gemma's context in tokens (default {NUM_CTX})")
+    ap.add_argument("--camera", action="store_true", help="--voice --robot: send the newest camera frame with each turn")
+    ap.add_argument("--whisper", default=WHISPER_URL, help=f"whisper.cpp's server (default {WHISPER_URL}; $PUPPER_WHISPER)")
+    ap.add_argument("--mic", default="default", help="the arecord device (default: PipeWire's default source)")
+    ap.add_argument("--speaker", default=None, help="the aplay device for Piper (default: the default sink)")
+    ap.add_argument("--tts", choices=["auto", "piper", "espeak", "print"], default="auto")
+    ap.add_argument("--piper-voice", type=Path, default=PIPER_VOICE, help=f"the Piper voice (default {PIPER_VOICE})")
+    ap.add_argument("--show", action="store_true", help="print the whole prompt and every tool declaration first")
+    args = ap.parse_args()
+
+    if args.check:
+        sys.exit(check(args.ollama, args.whisper, args.model))
+    model = args.model
+    if not model:
+        try:
+            model = pick_model(Ollama(args.ollama, "").models())
+        except (OllamaError, urllib.error.URLError, OSError) as e:
+            sys.exit(f"Can't reach Ollama at {args.ollama} ({e}). python3 robot/gemma_brain.py --check helps.")
+        if not model:
+            sys.exit(f"Ollama at {args.ollama} has no Gemma: on the Jetson, ollama pull gemma4:26b (Thor) "
+                     "or gemma4:e2b-it-qat (Orin Nano).")
+
+    try:
+        asyncio.run(run(args, model))  # setup inside the loop: the fake robot's job queue lives on it
+    except (KeyboardInterrupt, EOFError):
+        print()
+
+
+if __name__ == "__main__":
+    main()
