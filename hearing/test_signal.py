@@ -200,10 +200,47 @@ def test_detect():
     f = scene((3.0, Y.clap(-38)))
     check("a single tap is not knocking", "knock" not in kinds(D.find_events(f, complete_only=False)))
 
+    # Soft knocks (under the threshold) are offered to YAMNet only by a live detector that asks for them
+    f = scene(*[(3.0 + 0.3 * i, Y.clap(-44, seed=i)) for i in range(3)])
+    check("three soft taps (16 dB over the room) are not knocking on their own",
+          "knock" not in kinds(D.find_events(f, complete_only=False)))
+    soft = [e for e in D.LiveDetector(soft_knocks=True).update(f) if e["cls"] == "knock"]
+    check("...but a live detector with soft_knocks offers them, marked soft",
+          len(soft) == 1 and soft[0]["info"].get("soft") is True, str(soft))
+    check("...and one without soft_knocks doesn't",
+          not [e for e in D.LiveDetector().update(f) if e["cls"] == "knock"])
+    test_knock_gate()
+
     f = scene((5.0, Y.clap(-30)))
     hi = D.find_events(f, {"floor_ref_c": -40.0}, complete_only=False)
     check("with a calibrated floor (floor_ref) louder than this room, the same clap is too quiet",
           hi == [], str(kinds(hi)))
+
+
+def test_knock_gate():
+    """KnockGate's rules, with a stand-in for YAMNet's scores (no model needed)."""
+    import math
+    import classify as C
+
+    class FakeYamnet:
+        def __init__(self, speech, knocklike):
+            self.t, self.last_knock_t = 5.0, -math.inf
+            self.speech, self.knocklike = [(3.5, speech)], [(3.5, knocklike)]
+
+    def passes(speech, knocklike, soft=False):
+        g = C.KnockGate(FakeYamnet(speech, knocklike))
+        g.add({"cls": "knock", "t0": 3.0, "t1": 3.6, "score": 15.0 if soft else 22.0, "info": {"soft": soft}})
+        return len(g.ready()) == 1
+
+    check("knock gate: a knock with some talking (speech 0.4) is kept", passes(0.4, 0.0))
+    check("knock gate: a knock YAMNet is sure was speech (0.8), with nothing knock-like, is dropped", not passes(0.8, 0.0))
+    check("knock gate: a knock over loud talking (0.8) is kept when YAMNet also heard a knock (0.2)", passes(0.8, 0.2))
+    check("knock gate: a soft knock is kept only if YAMNet heard something knock-like",
+          passes(0.0, 0.2, soft=True) and not passes(0.0, 0.0, soft=True))
+    g = C.KnockGate(FakeYamnet(0.0, 0.3))
+    g.c.last_knock_t = 4.0
+    g.add({"cls": "knock", "t0": 3.0, "t1": 3.6, "score": 22.0, "info": {}})
+    check("knock gate: no second alert when YAMNet already reported this knocking", g.ready() == [])
 
 
 # ----------------------------------------------------------------------------- live == batch

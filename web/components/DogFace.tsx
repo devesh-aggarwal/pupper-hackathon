@@ -219,8 +219,9 @@ const DogFace: React.FC<DogFaceProps> = ({ isListening, isSpeaking, audioLevel, 
       
       const wScale = w / 600; 
       const hScale = h / 500;
-      let newScale = Math.min(wScale, hScale);
-      newScale = Math.max(0.4, Math.min(1.2, newScale));
+      // 0.85: a little room at the edges, so the eyes (and their tracking) aren't cut off.
+      let newScale = Math.min(wScale, hScale) * 0.85;
+      newScale = Math.max(0.35, Math.min(1.0, newScale));
       setGlobalScale(newScale);
     };
     handleResize();

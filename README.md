@@ -196,7 +196,7 @@ PORT=8080 ./run_local.sh       # if 8000 is taken
 This runs the real robot server, your `lab/` tools and prompt, the reminders and the web app on
 your laptop; only ROS is replaced by the fake robot from the tests, so **nothing moves**: every
 motion is printed instead (`[fake robot] legs: gemini_walk took over`, `[fake robot] walking
-vx=0.4 ...`). Open the page, go to **Settings**, paste your Gemini key, press **WAKE PUPPER**, and
+vx=0.4 ...`). Open the page (the Gemini key fills in by itself from `~/.config/gemini-pupper/api_key` via `GET /config/api_key`; otherwise paste it in **Settings**), press **WAKE PUPPER**, and
 talk through your laptop's mic (allow mic and camera when Chrome asks). It builds the web app
 first if needed (needs Node.js), and needs `fastapi uvicorn psutil pydantic pyyaml`; on NixOS,
 without python3/npm, it reruns itself in a `nix-shell` that has them. Reminders made here go to
@@ -299,6 +299,15 @@ The laptop and the Pupper must be on the same network for `.local` (mDNS) to res
 password from then on, set up key-based login once: `ssh-copy-id pi@pupper5.local` (or
 `./tools/pup setup`).
 
+## `tools/mic_monitor.py`: which mic is Pupper listening with?
+
+A small page, run on the Pupper (`python3 tools/mic_monitor.py`, port 8090; open
+`http://<pupper>:8090`, or `ssh -N -L 8090:localhost:8090 ...` then `http://localhost:8090`). It
+shows PipeWire's default input (what `arecord -D default`, so `robot/gemma_brain.py`, records
+from), every program recording right now (the brain shows up as `arecord`, the kiosk as
+Chromium), and a live level bar. It only reads the mic's loudness: nothing moves, no audio leaves
+the Pupper. Standard library only.
+
 ## `./tools/pup`: quick testing on the Pupper
 
 `./tools/pup` runs commands on the Pupper, copies files, and launches scripts, including GUI apps
@@ -364,9 +373,10 @@ green, blue, purple, white, black); reminders are a white card too, and a tap cl
 sound alerts take over the whole screen. The face blinks and changes emotion by itself (sleepy when
 not connected, listening, happy while talking, excited when a search finds something, surprised at
 a sound alert, sad on a fault). **Demo without a robot:** `cd web && npm run dev`, then open
-`https://localhost:5173/?demo` for a scripted loop of all of these (`web/services/demo.ts`; nothing
-moves, no Gemini). With **Captions** on (Settings, default on) everything Pupper says is also
-written on its face (Gemini Live's output transcription). With **Sound alerts** on
+`https://localhost:5173/?demo` (`web/services/demo.ts`): the face, awake, with no robot and no
+Gemini (nothing moves); it asks for the mic, and real sounds in the room perk the ears up. With
+**Captions** on (Settings, default on) everything Pupper says is also written on its face (Gemini
+Live's output transcription). With **Sound alerts** on
 (default on), the browser measures the mic (dB above a slowly adapting background; Pupper's own
 voice is ignored) and posts loud moments to `POST /alerts/sound`; the robot decides: alerts off
 (`sound_alerts(enabled=false)`, "stop listening"), under the sensitivity (`low`/`medium`/`high`
@@ -607,8 +617,9 @@ provided registry besides the list of modules.
 sounddevice, all on the Pupper), sound alerts come from `hearing/listener.py` instead of the
 browser's measurement. It listens through PipeWire, next to the kiosk:
 
-- **Bangs and shouts:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
-  thresholds in dB above the room's noise floor.
+- **Bangs:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
+  thresholds in dB above the room's noise floor. It also detects shouts, but shouting is
+  not an alert (it is not in `URGENT` in `lab/hackathon_alerts.py`), so it shows nothing.
 - **Sirens, alarms, doorbells, crashes, knocking and a baby crying:** Google's YAMNet
   (`hearing/classify.py`, AudioSet's 521 classes through LiteRT, on-device, about 1.5 ms per
   0.5 s).
