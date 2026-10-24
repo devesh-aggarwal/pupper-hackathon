@@ -337,7 +337,8 @@ def voice_tests() -> None:
           and body.endswith(f"--{boundary}--\r\n".encode()) and wav in body)
 
     for raw, want in ((" Walk forward. ", "Walk forward."), ("[BLANK_AUDIO]", ""), ("(music) hi there", "hi there"),
-                      (" ... ", ""), ("*coughs*", "")):
+                      (" ... ", ""), ("*coughs*", ""), (" Thank you.", ""), ("Thanks for watching!", ""), ("Ah.", ""),
+                      ("Thank you, now sit down.", "Thank you, now sit down.")):
         check(f"whisper's {raw!r} is heard as {want!r}", gb.clean_heard(raw) == want, gb.clean_heard(raw))
     for text in ("Stop!", "stop.", "Pupper, stop.", "hey pupper stop", "Stop now!", "Freeze!"):
         check(f"{text!r} stops at once", bool(gb.STOP_WORDS.match(text)))
