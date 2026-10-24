@@ -485,8 +485,8 @@ class SileroEndpointer:
     (by loudness alone, a busy room made 15 s "utterances" of noise that whisper turned to nonsense).
     Used like Endpointer: feed() 32 ms frames; an utterance comes out when it has ended."""
 
-    def __init__(self, model: Path = VAD_MODEL, rate: int = 16000, start_s: float = 0.1, end_s: float = 0.7,
-                 min_s: float = 0.3, max_s: float = 8.0, pre_s: float = 0.3, on: float = 0.5, off: float = 0.35):
+    def __init__(self, model: Path = VAD_MODEL, rate: int = 16000, start_s: float = 0.25, end_s: float = 0.7,
+                 min_s: float = 0.5, max_s: float = 8.0, pre_s: float = 0.4, on: float = 0.6, off: float = 0.35):
         import numpy as np
         import onnxruntime as ort
 
@@ -591,9 +591,17 @@ def multipart(fields: dict[str, str], file_field: str, filename: str, data: byte
     return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
 
 
+# What whisper says for noise, chatter and silence, not for speech: alone, they are dropped (a
+# noisy room made "Thank you." turns, and Pupper answered each "You're welcome").
+HALLUCINATIONS = {"thank you", "thank you very much", "thanks", "thanks for watching", "thank you for watching",
+                  "you", "bye", "bye bye", "ah", "oh", "uh", "um", "hmm", "mm", "huh", "so", "okay", "the end"}
+
+
 def clean_heard(text: str) -> str:
     """whisper's words without its notes ([BLANK_AUDIO], (music)); "" if nothing was said."""
     text = " ".join(re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", " ", text or "").split())
+    if re.sub(r"[^a-z ]", "", text.lower()).strip() in HALLUCINATIONS:
+        return ""
     return text if re.search(r"[A-Za-z]", text) else ""
 
 
@@ -608,7 +616,7 @@ class Whisper:
               "shake your paw, follow me, stop, remind me, remember, find my cup.")
 
     def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
-        body, ctype = multipart({"response_format": "json", "temperature": "0.0", "prompt": self.PROMPT},
+        body, ctype = multipart({"response_format": "json", "temperature": "0.0", "language": "en", "prompt": self.PROMPT},
                                 "file", "speech.wav", to_wav(pcm, rate), "audio/wav")
         req = urllib.request.Request(self.url + "/inference", data=body, headers={"Content-Type": ctype})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:

@@ -7,7 +7,9 @@
 #      whisper.cpp (speech to text, port 8178), for this Mac only
 #   3. starts the link: an ssh connection to the Pupper, kept up in the background, that makes
 #      those two ports localhost on the Pupper too (the Pupper can't reach this Mac by itself)
-#   4. runs ./run_pupper.sh on the Pupper: the robot, its face, its mic and speaker, the brain
+#   4. starts the eyes on this Mac (vision/eyes.py: depth, detector and Gemma, 5 frames a second,
+#      against the Pupper's camera; the Pupper's own eyes manage about 1 and stand down for these)
+#   5. runs ./run_pupper.sh on the Pupper: the robot, its face, its mic and speaker, the brain
 #
 # Ctrl+C stops the robot. The servers and the link keep running, so ./run_pupper.sh on the Pupper
 # itself works too, until the Mac sleeps or restarts.   tools/brain_on_mac.sh stop   ends them.
@@ -21,6 +23,8 @@ WANT=gemma4:26b    # the best brain this Mac can run: a mixture of experts, 4B a
 WHISPER_MODEL=${PUPPER_WHISPER_MODEL:-large-v3-turbo-q5_0}  # far better than base.en in a noisy room; fast on the GPU
 OLLAMA_PORT=11435  # not 11434: the Ollama app may hold that
 WHISPER_PORT=8178
+EYES_PORT=8101     # the Mac's eyes (vision/eyes.py) answer /look here; the Pupper's own use 8100
+WHISPER_ARGS="-l en -sns"  # English, and no tokens for non-speech (coughs, music, chatter)
 CACHE=$HOME/.cache/pupper
 LOG=$CACHE/logs
 SAVED=$HOME/.config/pupper/ssh
@@ -29,7 +33,7 @@ die() { echo "!! $*" >&2; exit 1; }
 alive() { [ -f "$CACHE/$1.pid" ] && kill -0 "$(cat "$CACHE/$1.pid")" 2>/dev/null; }
 
 if [ "${1:-}" = stop ]; then
-  for name in web link whisper ollama; do alive $name && kill "$(cat "$CACHE/$name.pid")" && echo "stopped $name"; rm -f "$CACHE/$name.pid"; done
+  for name in eyes web link whisper ollama; do alive $name && kill "$(cat "$CACHE/$name.pid")" && echo "stopped $name"; rm -f "$CACHE/$name.pid"; done
   pkill -f "ssh .*-R $OLLAMA_PORT:localhost:$OLLAMA_PORT" 2>/dev/null
   exit 0
 fi
@@ -75,7 +79,7 @@ if ! ollama show "$WANT" >/dev/null 2>&1; then
 fi
 
 whisper_up() { curl -sf -m 2 -o /dev/null "http://127.0.0.1:$WHISPER_PORT/"; }
-if whisper_up && [ "$(cat "$CACHE/whisper.model" 2>/dev/null)" != "$WHISPER_MODEL" ]; then  # an older model: swap it
+if whisper_up && [ "$(cat "$CACHE/whisper.model" 2>/dev/null)" != "$WHISPER_MODEL $WHISPER_ARGS" ]; then  # older settings: restart
   alive whisper && kill "$(cat "$CACHE/whisper.pid")"
   pkill -f "whisper-server .*--port $WHISPER_PORT" 2>/dev/null; sleep 1
 fi
@@ -92,8 +96,8 @@ if ! whisper_up; then
     curl -fL -C - --retry 5 --retry-delay 2 --progress-bar -o "$WM.part" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$WHISPER_MODEL.bin" \
       && mv "$WM.part" "$WM" || die "the whisper model download failed"
   fi
-  nohup whisper-server -m "$WM" -l en --host 127.0.0.1 --port $WHISPER_PORT > "$LOG/whisper.log" 2>&1 &
-  echo $! > "$CACHE/whisper.pid"; echo "$WHISPER_MODEL" > "$CACHE/whisper.model"
+  nohup whisper-server -m "$WM" $WHISPER_ARGS --host 127.0.0.1 --port $WHISPER_PORT > "$LOG/whisper.log" 2>&1 &
+  echo $! > "$CACHE/whisper.pid"; echo "$WHISPER_MODEL $WHISPER_ARGS" > "$CACHE/whisper.model"
   for _ in $(seq 30); do whisper_up && break; sleep 1; done
   whisper_up || die "whisper-server didn't start (log $LOG/whisper.log)"
 fi
@@ -101,9 +105,14 @@ echo "brain: Ollama :$OLLAMA_PORT, whisper :$WHISPER_PORT ($WHISPER_MODEL) (logs
 
 # --- 3. the link: the two ports on the Pupper, through ssh, reconnecting whenever it drops
 pupper_sees_brain() { "$PUP" sh "curl -sf -m 3 localhost:$OLLAMA_PORT/api/version >/dev/null && curl -sf -m 3 -o /dev/null localhost:$WHISPER_PORT/" >/dev/null 2>&1; }
+PORTS="$OLLAMA_PORT $WHISPER_PORT $EYES_PORT"
+if alive link && [ "$(cat "$CACHE/link.ports" 2>/dev/null)" != "$PORTS" ]; then  # an older link: other ports
+  kill "$(cat "$CACHE/link.pid")"; pkill -f "ssh .*-R $OLLAMA_PORT:localhost:$OLLAMA_PORT" 2>/dev/null; sleep 1
+fi
 if ! alive link; then
+  echo "$PORTS" > "$CACHE/link.ports"
   nohup bash -c "while true; do
-      PUPPER_TUNNEL_PORTS='$OLLAMA_PORT $WHISPER_PORT' '$PUP' link
+      PUPPER_TUNNEL_PORTS='$PORTS' '$PUP' link
       sleep 3
     done" > "$LOG/link.log" 2>&1 &
   echo $! > "$CACHE/link.pid"
@@ -115,10 +124,28 @@ if ! alive web; then  # Pupper's app on this Mac; if port 8000 is taken here, it
   nohup bash -c "while true; do '$PUP' web; sleep 10; done" > "$LOG/web.log" 2>&1 &
   echo $! > "$CACHE/web.pid"
 fi
+# --- 4. the eyes, here: the robot server through the web forward, /look back through the link
+VENV=$CACHE/venv
+if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -c "import onnxruntime, numpy, PIL, mediapipe" 2>/dev/null; then
+  echo "setting up the eyes' Python packages (once)..."
+  python3 -m venv "$VENV" && "$VENV/bin/pip" install -q -r "$HERE/vision/requirements.txt" mediapipe \
+    || die "the eyes' packages didn't install (log above)"
+fi
+if ! alive eyes; then
+  nohup bash -c "cd '$HERE' && while true; do
+      '$VENV/bin/python' -u vision/eyes.py --robot http://localhost:8000 --ollama http://127.0.0.1:$OLLAMA_PORT \
+        --gemma '$(ollama show "$WANT" >/dev/null 2>&1 && echo "$WANT" || echo "${HAVE:-$WANT}")' --hz 5 --always \
+        --port $EYES_PORT --advertise http://127.0.0.1:$EYES_PORT --source mac --describe-every 120 \
+        --fetch-depth-model --fetch-detector-model
+      sleep 5
+    done" > "$LOG/eyes.log" 2>&1 &
+  echo $! > "$CACHE/eyes.pid"
+fi
+echo "eyes: on this Mac at 5 Hz (log $LOG/eyes.log)"
 echo "watch: http://localhost:8000 (Pupper's app), tail -f $LOG/ollama.log (each Gemma request),"
 echo "       OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT ollama ps (the model on the GPU)"
 
-# --- 4. the Pupper
+# --- 5. the Pupper
 echo
 "$PUP" tty "cd ~/pupper-hackathon && ./run_pupper.sh $*"
 "$PUP" sh "~/pupper-hackathon/robot/stop.sh" >/dev/null 2>&1 \
