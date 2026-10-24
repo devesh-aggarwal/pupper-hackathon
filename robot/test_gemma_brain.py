@@ -208,6 +208,27 @@ def loop_tests() -> None:
     check("...and the fake robot really walked forward", any(m.linear.x > 0 for m in twists), f"{len(twists)} speed commands")
     rig.close()
 
+    rig = Rig([{"content": "ready"}, {"content": "Hi there."}])
+    rig.brain.warm()
+    check("warm-up: Gemma reads the whole prompt and tools once, says nothing aloud",
+          len(rig.ollama.requests) == 1 and len(rig.ollama.requests[0]["tools"]) == len(rig.decls) and rig.said == [], rig.said)
+    rig.turn("hello")
+    sent = [m["content"] for m in rig.ollama.requests[1]["messages"][1:]]
+    check("... and the first real turn extends that exchange (so Ollama reuses what it read)",
+          len(sent) == 3 and sent[0].startswith("[robot] Starting up") and sent[1] == "ready" and sent[2] == "hello", sent)
+    rig.close()
+
+    rig = Rig([{"content": "", "tool_calls": [call("move", direction="forward")]}])
+    rig.brain.warm()
+    check("warm-up: a call in its reply is not run, and that exchange isn't kept",
+          rig.results == [] and rig.said == [] and rig.brain.history == [], (rig.results, rig.brain.history))
+    rig.close()
+
+    rig = Rig([(400, "registry.ollama.ai/library/gemma3:4b does not support tools"), {"content": '{"say": "", "calls": []}'}])
+    rig.brain.warm()
+    check("warm-up: a model without tool calling is switched to JSON replies before anyone speaks", rig.brain.mode == "json", rig.brain.mode)
+    rig.close()
+
     rig = Rig([{"content": "", "tool_calls": [call("find", what="cup")]},
                {"content": "thought\nI found your cup. It is on the table."}])
     rig.turn("where is my cup? find it")
@@ -327,11 +348,13 @@ def voice_tests() -> None:
 def cli_tests() -> None:
     print("Brain: the command line, end to end (python3 robot/gemma_brain.py, typing, on the fake robot)")
     script = HERE / "gemma_brain.py"
-    ollama = FakeOllama([{"content": "", "tool_calls": [call("stand_up")]}, {"content": "Up I get!"}],
+    ollama = FakeOllama([{"content": ""},  # the warm-up
+                         {"content": "", "tool_calls": [call("stand_up")]}, {"content": "Up I get!"}],
                         models=("llama3:8b", "gemma4:e2b-it-qat"))
     out = subprocess.run([sys.executable, str(script), "--ollama", ollama.url], input="stand up\nquit\n",
                          capture_output=True, text=True, timeout=60, env=os.environ).stdout
     check("it picks the Gemma Ollama has", "Gemma: gemma4:e2b-it-qat" in out, out[:300])
+    check("it warms Gemma up before the first turn", "ready (" in out, out[:400])
     check("it runs Gemma's call on the fake robot and says the answer",
           "-> Gemma calls stand_up({})" in out and '"success": true' in out and "Pupper > Up I get!" in out, out[-600:])
     ollama.close()

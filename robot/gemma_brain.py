@@ -299,6 +299,23 @@ class Brain:
             self.say("Sorry, my brain isn't answering right now.")
         self._trim()
 
+    def warm(self) -> float:
+        """Gemma reads the whole prompt and tools once, before anyone speaks, and the exchange stays as
+        the start of the conversation: Ollama reuses a cached prompt reliably only when the next
+        request extends it (Gemma 4's sliding-window attention), so the first real turn then takes
+        about a second, not ten. A call in the reply is not run (and the exchange isn't kept). Also
+        settles whether this model calls tools natively or needs JSON replies. Returns the seconds."""
+        t0 = time.time()
+        self.history = [{"role": "user", "content": "[robot] Starting up; nobody has spoken yet. Reply with one word: ready."}]
+        try:
+            _, calls, _ = self._ask()
+        except BaseException:
+            self.history = []
+            raise
+        if calls:
+            self.history = []
+        return time.time() - t0
+
     def _ask(self) -> tuple[str, list[tuple[str, dict]], bool]:
         """One reply from Gemma: (what to say, the calls, whether they were native tool calls)."""
         messages = [self.system()] + self.history
@@ -343,8 +360,10 @@ class Brain:
             + (" Reply in the same JSON form." if self.mode == "json" else " Now tell the person what happened.")})
 
     def _trim(self) -> None:
+        # Half at a time: every trim changes the start of the conversation, and Gemma re-reads the
+        # whole prompt (about 10 s), so it should happen rarely.
         if len(self.history) > self.keep:
-            h = self.history[-self.keep:]
+            h = self.history[-(self.keep // 2):]
             while h and h[0]["role"] != "user":  # never start on a tool reply
                 h = h[1:]
             self.history = h
@@ -715,9 +734,16 @@ async def run(args, model: str) -> None:
             transcript(backend, "pupper", text)
 
         brain = Brain(llm, prompt, decls, backend, say, args.tools)
-        await voice_loop(brain, backend, Mic(args.mic), Whisper(args.whisper), speaker, args.camera)
     else:
         brain = Brain(llm, prompt, decls, backend, lambda text: print(f"Pupper > {text}"), args.tools)
+    print("Gemma is reading the prompt and tools once, so the first turn is quick...", flush=True)
+    try:
+        print(f"  ready ({await asyncio.to_thread(brain.warm):.1f} s)")
+    except (OllamaError, urllib.error.URLError, OSError) as e:
+        print(f"  !! Gemma did not answer: {e}")
+    if args.voice:
+        await voice_loop(brain, backend, Mic(args.mic), Whisper(args.whisper), speaker, args.camera)
+    else:
         await type_loop(brain, backend)
 
 
