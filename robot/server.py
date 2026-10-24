@@ -569,7 +569,8 @@ def transcript_get(n: int = 50):
 
 # The local brain (robot/gemma_brain.py) has no browser of its own: it posts what it is doing, and
 # the face (the web app with ?brain=local) shows it, as it shows Gemini Live's.
-BRAIN = {"listening": False, "speaking": False, "caption": None, "time": 0.0}
+BRAIN = {"listening": False, "speaking": False, "caption": None, "time": 0.0,
+         "local": os.environ.get("PUPPER_BRAIN") == "gemma"}  # run_pupper.sh started the local brain: no Gemini
 
 
 @app.post("/brain/state")

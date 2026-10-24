@@ -8,7 +8,7 @@ import { GeminiLiveService } from './services/geminiLive';
 import RobotBridge from './services/robotBridge';
 import { RobotEvents } from './services/robotEvents';
 import { DEMO, runDemo } from './services/demo';
-import { LOCAL_BRAIN, LocalBrainService } from './services/localBrain';
+import { LOCAL_BRAIN as LOCAL_BRAIN_URL, LocalBrainService } from './services/localBrain';
 
 // Icons
 const CogIcon = () => (
@@ -137,6 +137,11 @@ const App: React.FC = () => {
 
   const geminiRef = useRef<GeminiLiveService | null>(null);
   const localRef = useRef<LocalBrainService | null>(null);  // ?brain=local: Gemma on the robot's side
+  // The local brain: ?brain=local, or the robot says run_pupper.sh started it (then never Gemini).
+  const [LOCAL_BRAIN, setLocalBrain] = useState(LOCAL_BRAIN_URL);
+  useEffect(() => {
+    if (!LOCAL_BRAIN_URL) bridgeRef.current.getBrainState().then(s => { if (s?.local) setLocalBrain(true); });
+  }, [config.robotApiUrl]);
   // Persistent bridge instance for polling
   const bridgeRef = useRef<RobotBridge>(new RobotBridge(config.robotApiUrl));
 
@@ -235,7 +240,7 @@ const App: React.FC = () => {
     localRef.current = service;
     service.start();
     return () => { service.stop(); localRef.current = null; };
-  }, [config, addLog]);
+  }, [LOCAL_BRAIN, config, addLog]);
 
   // Demo mode (?demo): a scripted scene, no robot and no Gemini (services/demo.ts)
   useEffect(() => {

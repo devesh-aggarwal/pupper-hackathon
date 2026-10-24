@@ -675,7 +675,7 @@ the eyes, since the eyes are a few calls a second at most.
 
 ## The local brain on a Mac
 
-The brain's heavy half on a Mac, the rest on the Pupper, over WiFi: one command, on the Mac.
+The brain's heavy half on a Mac, the rest on the Pupper, over ssh: one command, on the Mac.
 
 ```bash
 ./run_pupper.sh          # or ./run_pupper.sh 50 for the speaker's volume; Ctrl+C stops everything
@@ -683,7 +683,7 @@ The brain's heavy half on a Mac, the rest on the Pupper, over WiFi: one command,
 
 ```
   Mac (Apple silicon)                                Pupper (Pi 5)
-  Ollama + Gemma 4 26B     :11435   <~~ WiFi ~~>      robot/server.py :8000 (localhost only)
+  Ollama + Gemma 4 26B     :11435   <~~ ssh ~~~>      robot/server.py :8000 (localhost only)
   whisper.cpp (Metal)      :8178                     robot/gemma_brain.py, mic, speaker, Piper
 ```
 
@@ -691,9 +691,10 @@ What it does, in order (`tools/brain_on_mac.sh`; `run_pupper.sh` runs it on a Ma
 
 1. Checks it can reach the Pupper over ssh, and copies this checkout to it (`tools/pup sync`), so
    the Pupper runs exactly what you see. Nothing else starts if the Pupper can't be reached.
-2. Starts an Ollama of its own on port 11435, reachable from the network, with the context the
+2. Starts an Ollama of its own on port 11435 (this Mac only), with the context the
    brain needs (16k tokens) and Gemma kept loaded. An Ollama app you already run is left alone:
-   they share the downloaded models.
+   they share the downloaded models. Both servers reach the Pupper through the ssh connection
+   (tunnels), so the Mac and the Pupper don't need the same network: venue WiFi or ngrok both work.
 3. Starts whisper.cpp's server on the Mac's GPU (installing it with Homebrew, and its `base.en`
    model, the first time).
 4. Runs `./run_pupper.sh` on the Pupper with the brain pointed at the Mac. There it checks it can
@@ -716,7 +717,10 @@ the ssh connection dropping. Run it with Pupper on the floor and a hand near the
 when you ask it to.
 
 Once per laptop: `./tools/pup setup` (the ssh key) and Ollama (`brew install ollama` or the app).
-If `pupper5.local` doesn't resolve on the WiFi: `PUPPER_HOST=pi@<the Pupper's IP> ./run_pupper.sh`.
+If `pupper5.local` doesn't resolve: `PUPPER_HOST=pi@<the Pupper's IP> ./run_pupper.sh`. Through an ngrok
+tunnel: `PUPPER_HOST=pi@4.tcp.us-cal-1.ngrok.io PUPPER_PORT=18196 ./run_pupper.sh` (the address ngrok
+gives). Run on the Pupper itself, `./run_pupper.sh` only says to start from the Mac
+(`PUPPER_BRAIN=gemini` there starts the Gemini Live app instead).
 
 **The model: `gemma4:26b`.** A mixture of experts with 4B parameters active per token, so it is
 fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. Until it is pulled
@@ -743,10 +747,6 @@ square. With `gemma4:26b`, the brain:
 
 Things to know:
 
-- **The network.** The Mac and the Pupper must reach each other. Venue WiFi often blocks that
-  (client isolation): the Pupper's check then fails with that hint. Use a phone hotspot.
-- **macOS may ask** to let `ollama` and `whisper-server` accept incoming connections: allow it.
-  While this runs, both are reachable by anyone on the same network.
 - **The Mac's terminal** shows what Pupper hears, says and does, besides the face.
 - **Is a laptop "on-device"?** The model runs on the table in front of you, with no cloud. Check with
   the organizers that this counts.
@@ -792,7 +792,7 @@ Google Gemma Hardware Hackathon:
 - **Biggest change from Lab 6:** Lab 6 is driven by **Gemini Live, a cloud API**, which the
   hackathon forbids. We keep the Lab 6 architecture (tools, the job queue, policies, tricks) and
   replace Gemini Live with a **local Gemma** brain, plus local speech-to-text and text-to-speech:
-  `robot/gemma_brain.py` on the Pi, with Gemma and whisper on a Mac over WiFi
+  `robot/gemma_brain.py` on the Pi, with Gemma and whisper on a Mac over ssh
   ([The local brain on a Mac](#the-local-brain-on-a-mac)). The features above are
   already brain-agnostic: tools, events and endpoints on the robot; the object detector and the
   sound monitor already run on-device.

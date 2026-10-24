@@ -14,19 +14,22 @@
 #   ./pup get <remote> [local]  copy a file or folder from the Pi (default: .)
 #   ./pup kill <pattern>        kill processes on the Pi matching a pattern
 #
-# Env overrides: PUPPER_HOST (default pi@pupper5.local), PUPPER_KEY (default ~/.ssh/pupper_ed25519),
-# PUPPER_PASSWORD (used only by `setup`).
+# Env overrides: PUPPER_HOST (default pi@pupper5.local), PUPPER_PORT (default 22; an ngrok tunnel's
+# port, e.g. PUPPER_HOST=pi@4.tcp.us-cal-1.ngrok.io PUPPER_PORT=18196), PUPPER_KEY (default
+# ~/.ssh/pupper_ed25519), PUPPER_PASSWORD (used only by `setup`), PUPPER_TUNNEL_PORTS (tty only:
+# these ports on this machine are reachable as localhost on the Pi, through the ssh connection).
 
 set -euo pipefail
 
 HOST="${PUPPER_HOST:-pi@pupper5.local}"
 KEY="${PUPPER_KEY:-$HOME/.ssh/pupper_ed25519}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_REPO="pupper-hackathon-setup"
+PORT="${PUPPER_PORT:-22}"
+REMOTE_REPO="pupper-hackathon"
 SCRATCH="/tmp/pup"
 
 # Reuse one connection for all commands, so each call after the first is fast.
-SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+SSH_OPTS=(-i "$KEY" -o Port="$PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
   -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath="$HOME/.ssh/pup-%r@%h:%p"
   -o ControlPersist=10m)
 
@@ -40,7 +43,7 @@ quote_args() { local out="" a; for a in "$@"; do out+=" $(printf '%q' "$a")"; do
 
 setup() {
   [ -f "$KEY" ] || ssh-keygen -t ed25519 -N "" -C "pupper-dev" -f "$KEY" -q
-  if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
+  if ssh -i "$KEY" -o Port="$PORT" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
        -o StrictHostKeyChecking=accept-new "$HOST" true 2>/dev/null; then
     echo "pup: key already works for $HOST"; return
   fi
@@ -48,7 +51,7 @@ setup() {
   [ -n "$pw" ] || { read -rsp "Password for $HOST: " pw; echo; }
   PUP_PW="$pw" expect -c "
     set timeout 30
-    spawn ssh -o StrictHostKeyChecking=accept-new $HOST \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"
+    spawn ssh -p $PORT -o StrictHostKeyChecking=accept-new $HOST \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"
     expect -re {(?i)password:} { send \"\$env(PUP_PW)\r\" }
     send [exec cat $KEY.pub]; send \"\n\"; send \"\004\"
     expect eof
@@ -75,7 +78,11 @@ case "$cmd" in
   setup) setup ;;
   shell) remote_tty ;;
   sh)    [ $# -gt 0 ] || die "usage: pup sh <cmd...>"; remote "$*" ;;
-  tty)   [ $# -gt 0 ] || die "usage: pup tty <cmd...>"; remote_tty "$*" ;;
+  tty)   [ $# -gt 0 ] || die "usage: pup tty <cmd...>"
+         # its own connection (forwards need it), and it fails if a forward can't be set up
+         fwd=(-o ControlPath=none -o ExitOnForwardFailure=yes)
+         for p in ${PUPPER_TUNNEL_PORTS:-}; do fwd+=(-R "$p:localhost:$p"); done
+         ssh -t "${fwd[@]}" "${SSH_OPTS[@]}" "$HOST" "$*" ;;
   sudo)  [ $# -gt 0 ] || die "usage: pup sudo <cmd...>"; remote "sudo bash -c $(printf '%q' "$*")" ;;
   run)   [ $# -gt 0 ] || die "usage: pup run <file> [args]"; remote "$(stage "$@")" ;;
   gui)   [ $# -gt 0 ] || die "usage: pup gui <file> [args]"; remote "$GUI_ENV $(stage "$@")" ;;

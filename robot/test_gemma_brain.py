@@ -369,8 +369,8 @@ def cli_tests() -> None:
     ollama2 = FakeOllama([{"content": "Hi."}, {"content": "", "tool_calls": [call("stand_up")]}])
     proc = subprocess.run([sys.executable, str(script), "--check", "--ollama", "http://127.0.0.1:9"],
                           capture_output=True, text=True, timeout=60)
-    check("--check: Ollama unreachable says what to look at (the network, the WiFi)",
-          proc.returncode == 1 and "Ollama listening on the network" in proc.stdout and "hotspot" in proc.stdout, proc.stdout)
+    check("--check: Ollama unreachable says what to do (start Pupper from the Mac)",
+          proc.returncode == 1 and "Start Pupper from the Mac" in proc.stdout, proc.stdout)
     proc = subprocess.run([sys.executable, str(script), "--check", "--voice", "--ollama", ollama2.url, "--whisper",
                            "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
     check("--check --voice: no whisper is a failure (Pupper couldn't hear)",

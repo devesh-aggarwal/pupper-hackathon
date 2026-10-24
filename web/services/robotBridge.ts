@@ -195,7 +195,7 @@ class RobotBridge {
   }
 
   /** The local brain (robot/gemma_brain.py): listening, speaking, the caption, and how fresh that is. */
-  async getBrainState(): Promise<{ listening: boolean; speaking: boolean; caption: string | null; age_s: number | null } | null> {
+  async getBrainState(): Promise<{ listening: boolean; speaking: boolean; caption: string | null; age_s: number | null; local: boolean } | null> {
     return this.request('/brain/state', 'GET');
   }
 

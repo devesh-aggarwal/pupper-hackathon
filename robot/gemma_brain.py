@@ -670,9 +670,8 @@ def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = Fa
     try:
         names = Ollama(ollama_url, "").models()
     except (OllamaError, urllib.error.URLError, OSError) as e:
-        print(f"unreachable ({e}).\n  Is that machine on and Ollama listening on the network, not only on its"
-              " localhost? Can this one reach it at all (ping it)? Venue WiFi often keeps devices from"
-              " reaching each other: then use a phone hotspot.")
+        print(f"unreachable ({e}).\n  Start Pupper from the Mac (./run_pupper.sh there): it runs Ollama and"
+              " reaches the Pupper through the ssh connection.")
         return 1
     print("ok: " + (", ".join(names) or "no models"))
     if model and model not in names and model + ":latest" not in names:

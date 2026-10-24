@@ -35,6 +35,12 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export PATH=$HOME/.local/node/bin:$PATH   # robot/setup.sh installs Node there
 export PUPPER_MEMORY_FILE=${PUPPER_MEMORY_FILE:-$HOME/.config/gemini-pupper/memory.json}
 BRAIN=gemini; [ -n "${PUPPER_OLLAMA:-}" ] && BRAIN=gemma  # gemma: the Mac started us
+if [ $BRAIN = gemini ] && [ "${PUPPER_BRAIN:-}" != gemini ]; then
+  echo "Pupper's brain runs on the Mac: start it there with ./run_pupper.sh (it starts this side too)."
+  echo "Through ngrok: PUPPER_HOST=pi@<ngrok host> PUPPER_PORT=<ngrok port> ./run_pupper.sh, on the Mac."
+  echo "(PUPPER_BRAIN=gemini ./run_pupper.sh here starts the Gemini Live web app instead: cloud, needs the key.)"
+  exit 1
+fi
 
 stop_all() {
   echo; echo "stopping..."
@@ -51,11 +57,11 @@ else
   echo "brain: Gemini Live in the web app (cloud). For the local brain, run ./run_pupper.sh on the Mac."
 fi
 
-# --- 1. the web app build (web/dist), rebuilt when a source file is newer
+# --- 1. the web app build (web/dist), rebuilt when its sources changed. By content, not by date:
+# tools/pup sync copies the Mac's dates, which can be older than the last build here.
+web_sources() { find web -type f -not -path 'web/node_modules/*' -not -path 'web/dist/*' | sort | xargs cat | sha1sum | cut -d' ' -f1; }
 need_build=0
-if [ ! -f web/dist/index.html ]; then need_build=1
-elif [ -n "$(find web -newer web/dist/index.html -type f -not -path 'web/node_modules/*' -not -path 'web/dist/*' -print -quit)" ]; then need_build=1
-fi
+if [ ! -f web/dist/index.html ] || [ "$(cat web/dist/.sources 2>/dev/null)" != "$(web_sources)" ]; then need_build=1; fi
 if [ $need_build = 1 ]; then
   if ! command -v npm >/dev/null; then
     echo "web app not built and no npm: running robot/setup.sh first"; "$HERE/robot/setup.sh" || exit 1
@@ -63,6 +69,7 @@ if [ $need_build = 1 ]; then
     echo "building the web app (sources changed)..."
     (cd web && npm ci --no-audit --no-fund --loglevel=error && npm run build --silent 2>&1 | grep -vE "chunks are larger|dynamic import|manualChunks|chunkSizeWarningLimit|^$") || { echo "web build failed"; exit 1; }
   fi
+  [ -f web/dist/index.html ] && web_sources > web/dist/.sources
 fi
 
 # --- 2. Python packages for the robot server
@@ -89,7 +96,7 @@ echo "memory: $(python3 lab/hackathon_memory.py summary 2>/dev/null || echo 'una
 
 # --- 5. start (the local brain: the kiosk is its face, without Gemini; the eyes ask the Mac's Gemma)
 if [ $BRAIN = gemma ]; then
-  PUPPER_EYES_GEMMA=ollama "$HERE/robot/start.sh" $([ $KIOSK = 1 ] && echo --face) || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
+  PUPPER_BRAIN=gemma PUPPER_EYES_GEMMA=ollama "$HERE/robot/start.sh" $([ $KIOSK = 1 ] && echo --face) || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
 elif [ $KIOSK = 1 ]; then
   "$HERE/robot/start.sh" --kiosk || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
 else
