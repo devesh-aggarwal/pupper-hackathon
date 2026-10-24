@@ -609,16 +609,21 @@ async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Spe
 
 
 # ============================================================ checks, and main
-def check(ollama_url: str, whisper_url: str, model: str | None) -> int:
-    """Is everything on the Jetson reachable from here, and can its Gemma call a tool?"""
+def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = False) -> int:
+    """Is the brain's machine (the Mac or the Jetson) reachable from here, and can its Gemma call a
+    tool? With voice, whisper must answer too. Exits non-zero, saying what to fix, if not."""
     print(f"Ollama at {ollama_url} ... ", end="", flush=True)
     try:
         names = Ollama(ollama_url, "").models()
     except (OllamaError, urllib.error.URLError, OSError) as e:
-        print(f"unreachable ({e}).\n  Is the cable's link up (jetson/link.sh status, on both) and Ollama"
-              " listening on it (jetson/setup.sh)?")
+        print(f"unreachable ({e}).\n  Is that machine on and Ollama listening on the network, not only on its"
+              " localhost? Can this one reach it at all (ping it)? Venue WiFi often keeps devices from"
+              " reaching each other: then use a phone hotspot. With a Jetson: jetson/link.sh status, on both.")
         return 1
     print("ok: " + (", ".join(names) or "no models"))
+    if model and model not in names and model + ":latest" not in names:
+        print(f"  {model} isn't pulled there: ollama pull {model}")
+        return 1
     chosen = model or pick_model(names)
     if not chosen:
         print("  No Gemma pulled. On the Jetson: ollama pull gemma4:26b (Thor) or gemma4:e2b-it-qat (Orin Nano)")
@@ -642,7 +647,8 @@ def check(ollama_url: str, whisper_url: str, model: str | None) -> int:
         urllib.request.urlopen(whisper_url, timeout=3).close()
         print("ok")
     except (urllib.error.URLError, OSError) as e:
-        print(f"unreachable ({e}): only --voice needs it")
+        print(f"unreachable ({e})" + (": Pupper can't hear without it" if voice else ": only --voice needs it"))
+        return 1 if voice else 0
     return 0
 
 
@@ -665,6 +671,8 @@ async def run(args, model: str) -> None:
     if args.voice:
         speaker = Speaker(args.tts, args.piper_voice, args.speaker)
         print(f"Voice: {speaker.engine}; ears: whisper at {args.whisper}; mic: {args.mic}")
+        if speaker.engine == "print":
+            print("!! no Piper and no espeak-ng: Pupper will only print what it says (robot/setup_voice.sh)")
 
         def say(text: str) -> None:
             print(f"Pupper > {text}")
@@ -701,7 +709,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.check:
-        sys.exit(check(args.ollama, args.whisper, args.model))
+        sys.exit(check(args.ollama, args.whisper, args.model, args.voice))
     model = args.model
     if not model:
         try:

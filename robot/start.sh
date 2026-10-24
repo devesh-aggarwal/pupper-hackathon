@@ -46,14 +46,19 @@ curl -s -o /dev/null localhost:8000/health || { echo "robot server did not start
 # Pi's. Without any eyes the obstacle rule, go_to, explore and the follow guard are blind.
 # Log: $LOG/eyes.log. PUPPER_EYES=off skips this.
 pkill -f "[v]ision/eyes.py" 2>/dev/null
-# Gemma: through Google's API with the Gemini key while there is no Jetson (PUPPER_EYES_GEMMA=off
-# for depth + detector only, as the on-device rule wants for the final build).
-GEMMA="--no-gemma"; [ "${PUPPER_EYES_GEMMA:-api}" = "api" ] && [ -s "$KEY_FILE" ] && GEMMA="--gemma-api --gemma-api-key-file $KEY_FILE"
+# Gemma: through Google's API with the Gemini key while there is no Jetson; PUPPER_EYES_GEMMA=ollama
+# asks the local brain's Ollama instead ($PUPPER_OLLAMA, $PUPPER_GEMMA: the Mac or the Jetson), and
+# PUPPER_EYES_GEMMA=off is depth + detector only.
+GEMMA="--no-gemma"
+case "${PUPPER_EYES_GEMMA:-api}" in
+  api) [ -s "$KEY_FILE" ] && GEMMA="--gemma-api --gemma-api-key-file $KEY_FILE" ;;
+  ollama) GEMMA="--ollama ${PUPPER_OLLAMA:-http://localhost:11434} --gemma ${PUPPER_GEMMA:-gemma4:26b}" ;;
+esac
 if [ "${PUPPER_EYES:-on}" = "on" ] && python3 -c "import onnxruntime, numpy, PIL" 2>/dev/null; then
   setsid nohup nice -n 10 python3 -u $REPO/vision/eyes.py $GEMMA --hz 1 --depth-size 224 --fetch-depth-model --fetch-detector-model \
     > $LOG/eyes.log 2>&1 < /dev/null &
   for i in $(seq 1 20); do curl -s -o /dev/null localhost:8100/health && break; sleep 1; done
-  curl -s -o /dev/null localhost:8100/health && echo "      eyes: depth + detector on the Pi (slow fallback: run vision/eyes.py on a laptop for the demo), Gemma $([ "$GEMMA" = "--no-gemma" ] && echo off || echo "through the API") (log $LOG/eyes.log)" \
+  curl -s -o /dev/null localhost:8100/health && echo "      eyes: depth + detector on the Pi (slow fallback: run vision/eyes.py on a laptop for the demo), Gemma $(case "$GEMMA" in --no-gemma) echo off ;; --gemma-api*) echo "through the API" ;; *) echo "at ${PUPPER_OLLAMA:-localhost}" ;; esac) (log $LOG/eyes.log)" \
     || echo "      eyes: not up yet; see $LOG/eyes.log"
 else
   echo "      eyes: python3 -m pip install -r $REPO/vision/requirements.txt mediapipe  (no depth sense until then)"

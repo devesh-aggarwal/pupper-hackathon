@@ -5,6 +5,7 @@
 #   ./pup setup                 one-time: create an SSH key and install it on the Pi
 #   ./pup                       interactive shell on the Pi
 #   ./pup sh <cmd...>           run a shell command on the Pi
+#   ./pup tty <cmd...>          the same in a terminal, so Ctrl+C here reaches it there
 #   ./pup sudo <cmd...>         run a command as root on the Pi
 #   ./pup run <file> [args]     copy a local script to the Pi and run it (.py, .sh, or executable)
 #   ./pup gui <file> [args]     same as run, but attached to Pupper's display
@@ -74,6 +75,7 @@ case "$cmd" in
   setup) setup ;;
   shell) remote_tty ;;
   sh)    [ $# -gt 0 ] || die "usage: pup sh <cmd...>"; remote "$*" ;;
+  tty)   [ $# -gt 0 ] || die "usage: pup tty <cmd...>"; remote_tty "$*" ;;
   sudo)  [ $# -gt 0 ] || die "usage: pup sudo <cmd...>"; remote "sudo bash -c $(printf '%q' "$*")" ;;
   run)   [ $# -gt 0 ] || die "usage: pup run <file> [args]"; remote "$(stage "$@")" ;;
   gui)   [ $# -gt 0 ] || die "usage: pup gui <file> [args]"; remote "$GUI_ENV $(stage "$@")" ;;
@@ -88,6 +90,6 @@ case "$cmd" in
   kill)  [ $# -eq 1 ] || die "usage: pup kill <pattern>"; # Bracket the first character ("[s]leep") so the pattern doesn't match this remote shell's own command line.
     pat="[${1:0:1}]${1:1}"
     remote "pkill -e -f $(printf '%q' "$pat") || echo 'nothing matched'" ;;
-  -h|--help|help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command '$cmd' (try: pup help)" ;;
 esac

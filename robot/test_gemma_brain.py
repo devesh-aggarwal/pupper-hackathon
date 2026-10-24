@@ -332,9 +332,20 @@ def cli_tests() -> None:
           proc.returncode == 0 and "talks" in proc.stdout and "native, ok" in proc.stdout and "only --voice needs it" in proc.stdout,
           proc.stdout[-500:])
     ollama.close()
+    ollama2 = FakeOllama([{"content": "Hi."}, {"content": "", "tool_calls": [call("stand_up")]}])
     proc = subprocess.run([sys.executable, str(script), "--check", "--ollama", "http://127.0.0.1:9"],
                           capture_output=True, text=True, timeout=60)
-    check("--check: no Jetson says what to look at", proc.returncode == 1 and "jetson/link.sh" in proc.stdout, proc.stdout)
+    check("--check: Ollama unreachable says what to look at (the network, the WiFi)",
+          proc.returncode == 1 and "Ollama listening on the network" in proc.stdout and "hotspot" in proc.stdout, proc.stdout)
+    proc = subprocess.run([sys.executable, str(script), "--check", "--voice", "--ollama", ollama2.url, "--whisper",
+                           "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
+    check("--check --voice: no whisper is a failure (Pupper couldn't hear)",
+          proc.returncode == 1 and "can't hear without it" in proc.stdout, proc.stdout[-300:])
+    proc = subprocess.run([sys.executable, str(script), "--check", "--model", "gemma4:26b", "--ollama", ollama2.url],
+                          capture_output=True, text=True, timeout=60)
+    check("--check --model: a model that isn't pulled says how to pull it",
+          proc.returncode == 1 and "ollama pull gemma4:26b" in proc.stdout, proc.stdout[-300:])
+    ollama2.close()
     proc = subprocess.run([sys.executable, str(script), "--ollama", "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
     check("no Jetson: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
 

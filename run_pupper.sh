@@ -10,11 +10,16 @@
 # --laptop: no kiosk. Open the app from your laptop instead:
 #     ssh -N -L 8000:localhost:8000 pi@pupper5.local   then http://localhost:8000
 #
+# The local brain (no cloud): run ./run_pupper.sh on the Mac instead. It starts Gemma and whisper
+# there (tools/brain_on_mac.sh) and then this script on the Pupper, with PUPPER_OLLAMA set: then
+# there is no kiosk, and robot/gemma_brain.py listens and talks through Pupper's mic and speaker.
+#
 # Motors stay idle until someone asks Pupper to move. Keep it on the floor, hand near the
 # e-stop (the right stick on the gamepad relaxes the motors).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
+[ "$(uname)" = Darwin ] && exec "$HERE/tools/brain_on_mac.sh" "$@"  # on the Mac: the local brain
 VOLUME=30; KIOSK=1
 for arg in "$@"; do
   case "$arg" in
@@ -28,13 +33,22 @@ LOG=/tmp/gemini-pupper/server.log
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export PATH=$HOME/.local/node/bin:$PATH   # robot/setup.sh installs Node there
 export PUPPER_MEMORY_FILE=${PUPPER_MEMORY_FILE:-$HOME/.config/gemini-pupper/memory.json}
+BRAIN=gemini; [ -n "${PUPPER_OLLAMA:-}" ] && BRAIN=gemma KIOSK=0  # gemma: the Mac started us
 
 stop_all() {
   echo; echo "stopping..."
   "$HERE/robot/stop.sh"
   exit 0
 }
-trap stop_all INT TERM
+trap stop_all INT TERM HUP  # HUP: the Mac's ssh went away (Ctrl+C there, or the WiFi dropped)
+
+# --- 0. the local brain: can the Pupper reach Gemma and whisper on the Mac?
+if [ $BRAIN = gemma ]; then
+  python3 robot/gemma_brain.py --check --voice || { echo "nothing started: the Pupper can't use the brain on the Mac (above)"; exit 1; }
+  [ -f "${PUPPER_PIPER_VOICE:-$HOME/.local/share/piper/en_US-lessac-medium.onnx}" ] || "$HERE/robot/setup_voice.sh"
+else
+  echo "brain: Gemini Live in the web app (cloud). For the local brain, run ./run_pupper.sh on the Mac."
+fi
 
 # --- 1. the web app build (web/dist), rebuilt when a source file is newer
 need_build=0
@@ -72,8 +86,10 @@ wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk "BEGIN{print $VOLUME/100}")" 2>/dev
 # --- 4. memory: who Pupper is talking with (python3 lab/hackathon_memory.py show / reset)
 echo "memory: $(python3 lab/hackathon_memory.py summary 2>/dev/null || echo 'unavailable')"
 
-# --- 5. start
-if [ $KIOSK = 1 ]; then
+# --- 5. start (the local brain: no kiosk, whose app would connect Gemini; the eyes ask the Mac's Gemma)
+if [ $BRAIN = gemma ]; then
+  PUPPER_EYES_GEMMA=ollama "$HERE/robot/start.sh" || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
+elif [ $KIOSK = 1 ]; then
   "$HERE/robot/start.sh" --kiosk || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
 else
   "$HERE/robot/start.sh" || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
@@ -89,8 +105,13 @@ Talk to Pupper from about an arm's length. Try, in order:
   "Learn a happy dance: a push-up, then spin around."  ->  "Do the happy dance."
 Say "stop" (or use the gamepad's right stick) to stop right away. Ctrl+C here shuts everything down.
 
---- live tool calls and events ---
 EOF
+if [ $BRAIN = gemma ]; then
+  echo "--- the brain: Gemma on the Mac (what it hears, says and does) ---"
+  python3 -u robot/gemma_brain.py --robot --voice
+  stop_all
+fi
+echo "--- live tool calls and events ---"
 echo "session log: ~/pupper-logs/$(date +%F)/transcript.jsonl (+ frames/); read it with: python3 lab/hackathon_log.py 80"
 tail -n 0 -F "$LOG" 2>/dev/null | grep --line-buffered -E "server INFO tool |robot_api (INFO|WARNING|ERROR)|(events|reminders|vision) (INFO|WARNING)" \
   | sed -u -E 's/^[0-9-]+ ([0-9:]+),[0-9]+ (server|robot_api|events|reminders|vision) (INFO|WARNING|ERROR) /\1  /'
