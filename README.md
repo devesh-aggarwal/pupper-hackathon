@@ -170,7 +170,7 @@ Debugging: `tail -f /tmp/gemini-pupper/server.log` (your `lab/` code) and
 
 ```bash
 python3 -m pip install --user google-genai pyyaml
-python3 lab/test.py            # all 569 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 236, then the local brain's 75
+python3 lab/test.py            # all 571 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 236, then the local brain's 77
 python3 lab/test.py todo9      # one TODO
 python3 lab/test.py reminders  # the reminders (robot/test_reminders.py)
 python3 lab/test.py hackathon  # memory, screen, sound, vision, eyes, find (explore), guard, learning (or: hackathon explore)
@@ -709,15 +709,20 @@ an ssh connection, kept up in the background, that makes the two ports `localhos
    By default that's Tailscale, `pi@100.88.25.110`. When it stops working, it asks once for the ssh command you use and
    saves it. Then it updates `~/pupper-hackathon` on the Pupper from the repo (`git pull`), so
    push your changes first.
-2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11435
+2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11437
    (16k context, Gemma kept loaded; an Ollama app you already run is left alone, they share the
-   models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `large-v3-turbo` model,
-   the first time). Both listen on the Mac only.
+   models) behind `tools/ollama_relay.py` on port 11435, and whisper.cpp's server on the GPU
+   (installed with Homebrew, with its `large-v3-turbo` model, the first time). All listen on the
+   Mac only.
 3. Starts the link and checks the Pupper sees both servers through it.
-4. Starts the eyes on the Mac (`vision/eyes.py`, in `~/.cache/pupper/venv`): depth, the detector
-   and Gemma on the Pupper's camera at 5 frames a second, the rate the obstacle rule is designed
-   for. The Pupper's own eyes manage about 1 a second and stand down while these post.
-5. Runs `./run_pupper.sh` on the Pupper (below).
+4. Runs `./run_pupper.sh` on the Pupper (below). The eyes run there, on its camera.
+
+**The Pupper's WiFi sends slowly.** On a public hotspot it measured about 11 KB/s up (0.9 MB/s
+down), so what crosses the link is kept small. The brain gzips each request to Gemma (the prompt
+and 30 tools, ~32 KB, become ~10 KB; the relay unzips them), speech goes to whisper as Opus (3 s
+of speech: 103 KB as WAV, 10 KB as Opus; whisper-server `--convert` reads it), and the eyes stay
+on the Pupper, sending Gemma 512 px images. Over that link: a turn's request 1.5 s -> 0.5 s, 3 s
+of speech 5.8 s -> 1 s. The terminal prints how many KB each step sent.
 
 Ctrl+C stops the robot. The servers and the link keep running (until the Mac sleeps or restarts),
 so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_mac.sh stop` ends them.

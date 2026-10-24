@@ -379,6 +379,20 @@ FRAME = ("This is one frame from a small robot dog's fisheye camera, about 20 cm
          "at the bottom of the circle, and things at the left and right edges are beside the robot, not ahead.")
 
 
+def small_jpeg(jpeg: bytes, side: int = 512, quality: int = 75) -> bytes:
+    """The frame at most ``side`` px wide or high: the Pupper's WiFi sends slowly, and Gemma answers
+    "is there a backpack" or draws a box as well from 512 px."""
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(jpeg))
+    if max(im.size) <= side:
+        return jpeg
+    im.thumbnail((side, side))
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
+
+
 class Gemma:
     def __init__(self, url: str, model: str, timeout: float = 60.0):
         self.url, self.model, self.timeout = url.rstrip("/"), model, timeout
@@ -386,7 +400,7 @@ class Gemma:
     def ask(self, image_jpeg: bytes, prompt: str, json_mode: bool = False, max_tokens: int = 120) -> str:
         # think: False. Gemma 4 thinks unless told not to, its few tokens went to thinking, and
         # exists() got "" (no) for everything in view.
-        body = {"model": self.model, "prompt": prompt, "images": [base64.b64encode(image_jpeg).decode()],
+        body = {"model": self.model, "prompt": prompt, "images": [base64.b64encode(small_jpeg(image_jpeg)).decode()],
                 "stream": False, "think": False, "options": {"temperature": 0.1, "num_predict": max_tokens}}
         if json_mode:
             body["format"] = "json"

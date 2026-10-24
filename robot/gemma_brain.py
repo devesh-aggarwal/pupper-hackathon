@@ -30,6 +30,7 @@ import array
 import asyncio
 import base64
 import collections
+import gzip
 import io
 import json
 import math
@@ -171,11 +172,25 @@ class Ollama:
     def __init__(self, url: str, model: str, num_ctx: int = NUM_CTX, timeout: float = 180.0):
         self.url, self.model, self.num_ctx, self.timeout = url.rstrip("/"), model, num_ctx, timeout
         self.last: dict = {}  # the last reply, for its timings
+        self.sent = 0  # bytes the last request sent: the Pupper's WiFi sends slowly, so it's worth watching
+        self.gzip: bool | None = None  # gzip requests? Yes when tools/ollama_relay.py is in front (asked once)
+
+    def _relay(self) -> bool:
+        if self.gzip is None:
+            try:
+                with urllib.request.urlopen(self.url + "/relay", timeout=3) as r:
+                    self.gzip = bool(json.loads(r.read().decode()).get("gzip"))
+            except (urllib.error.URLError, OSError, ValueError):
+                self.gzip = False
+        return self.gzip
 
     def _req(self, path: str, body: dict | None = None, timeout: float | None = None) -> dict:
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(self.url + path, data=data,
-                                     headers={"Content-Type": "application/json"} if data else {})
+        headers = {"Content-Type": "application/json"} if data else {}
+        if data and self._relay():  # the conversation is mostly the same prompt and tools: ~5x smaller
+            data, headers["Content-Encoding"] = gzip.compress(data, 6), "gzip"
+        self.sent = len(data or b"")
+        req = urllib.request.Request(self.url + path, data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return json.loads(r.read().decode())
@@ -224,7 +239,7 @@ class Brain:
             for _ in range(MAX_ROUNDS):
                 t0 = time.time()
                 said, calls, native = await asyncio.to_thread(self._ask)
-                self.log(f"  (Gemma: {time.time() - t0:.1f} s)")
+                self.log(f"  (Gemma: {time.time() - t0:.1f} s, {self.llm.sent / 1000:.0f} KB sent)")
                 if said:
                     self.say(said)  # queued: the robot acts while Pupper talks
                 if not calls:
@@ -535,22 +550,44 @@ def clean_heard(text: str) -> str:
     return text if re.search(r"[A-Za-z]", text) else ""
 
 
+def to_opus(pcm: bytes, rate: int) -> bytes | None:
+    """Speech as Opus (24 kbit/s, ~10x smaller than WAV), with ffmpeg; None without it."""
+    if not shutil.which("ffmpeg"):
+        return None
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0",
+                        "-c:a", "libopus", "-b:a", "24k", "-f", "ogg", "pipe:1"], input=pcm, capture_output=True, timeout=10)
+    return r.stdout if r.returncode == 0 and r.stdout else None
+
+
 class Whisper:
-    """Speech to text: whisper.cpp's server (whisper-server) on the Mac, POST /inference."""
+    """Speech to text: whisper.cpp's server (whisper-server) on the Mac, POST /inference.
+
+    Sent as Opus when ffmpeg is here (the server converts it: whisper-server --convert), else WAV."""
 
     def __init__(self, url: str, timeout: float = 30.0):
         self.url, self.timeout = url.rstrip("/"), timeout
+        self.opus = True  # until the server can't take it
+        self.sent = 0
 
     # Words whisper should expect: it spells what it already knows (a hint, not a restriction).
     PROMPT = ("Pupper, stand up, sit down, lie down, walk forward, turn left, turn right, push-up, "
               "shake your paw, follow me, stop, remind me, remember, find my cup.")
 
     def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
-        body, ctype = multipart({"response_format": "json", "temperature": "0.0", "language": "en", "prompt": self.PROMPT},
-                                "file", "speech.wav", to_wav(pcm, rate), "audio/wav")
-        req = urllib.request.Request(self.url + "/inference", data=body, headers={"Content-Type": ctype})
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            return clean_heard(json.loads(r.read().decode()).get("text", ""))
+        audio = to_opus(pcm, rate) if self.opus else None
+        name, data, ctype = ("speech.ogg", audio, "audio/ogg") if audio else ("speech.wav", to_wav(pcm, rate), "audio/wav")
+        body, form = multipart({"response_format": "json", "temperature": "0.0", "language": "en", "prompt": self.PROMPT},
+                               "file", name, data, ctype)
+        self.sent = len(body)
+        req = urllib.request.Request(self.url + "/inference", data=body, headers={"Content-Type": form})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return clean_heard(json.loads(r.read().decode()).get("text", ""))
+        except urllib.error.HTTPError:
+            if not audio:
+                raise
+            self.opus = False  # this whisper-server can't convert (no --convert): WAV from now on
+            return self.transcribe(pcm, rate)
 
 
 class Speaker:
@@ -648,7 +685,8 @@ async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Spe
             t0 = time.time()
             try:
                 text = stt.transcribe(pcm, mic.rate)
-                print(f"  (whisper: {time.time() - t0:.1f} s for {len(pcm) / 2 / mic.rate:.1f} s of speech)", flush=True)
+                print(f"  (whisper: {time.time() - t0:.1f} s for {len(pcm) / 2 / mic.rate:.1f} s of speech,"
+                      f" {stt.sent / 1000:.0f} KB sent)", flush=True)
             except (urllib.error.URLError, OSError, ValueError) as e:
                 print(f"  !! whisper did not answer: {e}")
                 continue
