@@ -135,7 +135,7 @@ Once the Mac's model services and SSH link are up, the Pi can run the same comma
 Only start with Pupper on the ground, clear space around it, and a person at the e-stop:
 
 ```bash
-./run_pupper.sh           # kiosk on Pupper's screen, volume 30
+./run_pupper.sh           # kiosk on Pupper's screen, volume 100
 ./run_pupper.sh 50        # speaker volume 0-100
 ./run_pupper.sh --laptop  # no kiosk: open the app from your laptop through the SSH tunnel
 ```
