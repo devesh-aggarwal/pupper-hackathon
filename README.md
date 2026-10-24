@@ -829,6 +829,29 @@ Google Gemma Hardware Hackathon:
   already brain-agnostic: tools, events and endpoints on the robot; the object detector and the
   sound monitor already run on-device.
 
+  ```
+  {
+  "tagOwners": {
+    "tag:pupper": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["deveshaggarwal100@gmail.com"],
+      "dst": ["tag:pupper"],
+      "ip": ["tcp:22"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["deveshaggarwal100@gmail.com"],
+      "dst": ["tag:pupper"],
+      "users": ["pi"]
+    }
+  ]
+}
+```
+
 ## Safety
 
 - Test on the ground, never on a table, with a hand near the e-stop.
