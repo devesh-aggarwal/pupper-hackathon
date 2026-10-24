@@ -4,15 +4,14 @@ import { SoundMonitor } from './soundMonitor';
 import { OnDeviceObjectDetector } from './objectDetector';
 
 /**
- * ?brain=local: Pupper's brain is robot/gemma_brain.py (Gemma, no cloud), not Gemini Live. It
+ * Pupper's brain is robot/gemma_brain.py (Gemma, no cloud), never Gemini Live, on this branch. It
  * listens and talks on the robot itself, so the face only shows it: listening, a mouth that moves
  * while it talks, and the caption, from what it posts (GET /brain/state). Everything else the
  * Gemini session does for the robot runs here too: the sound monitor on the mic and the on-device
  * object detector on the robot's camera. Reminders the app claims go to the brain to say
  * (POST /brain/announce).
  */
-export const LOCAL_BRAIN = typeof window !== 'undefined'
-  && new URLSearchParams(window.location.search).get('brain') === 'local';
+export const LOCAL_BRAIN = true;  // the app never connects Gemini (no WAKE PUPPER button, no key)
 
 export class LocalBrainService {
   /** The brain was heard from in the last 5 s (it posts every second). */

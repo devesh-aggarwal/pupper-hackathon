@@ -6,6 +6,7 @@
 #   ./pup                       interactive shell on the Pi
 #   ./pup sh <cmd...>           run a shell command on the Pi
 #   ./pup tty <cmd...>          the same in a terminal, so Ctrl+C here reaches it there
+#   ./pup link                  hold an ssh connection that makes PUPPER_TUNNEL_PORTS here localhost on the Pi
 #   ./pup sudo <cmd...>         run a command as root on the Pi
 #   ./pup run <file> [args]     copy a local script to the Pi and run it (.py, .sh, or executable)
 #   ./pup gui <file> [args]     same as run, but attached to Pupper's display
@@ -14,17 +15,18 @@
 #   ./pup get <remote> [local]  copy a file or folder from the Pi (default: .)
 #   ./pup kill <pattern>        kill processes on the Pi matching a pattern
 #
-# Env overrides: PUPPER_HOST (default pi@pupper5.local), PUPPER_PORT (default 22; an ngrok tunnel's
-# port, e.g. PUPPER_HOST=pi@4.tcp.us-cal-1.ngrok.io PUPPER_PORT=18196), PUPPER_KEY (default
-# ~/.ssh/pupper_ed25519), PUPPER_PASSWORD (used only by `setup`), PUPPER_TUNNEL_PORTS (tty only:
-# these ports on this machine are reachable as localhost on the Pi, through the ssh connection).
+# Where the Pupper is: ~/.config/pupper/ssh ("pi@host port", one line; tools/brain_on_mac.sh writes
+# it, e.g. "pi@4.tcp.us-cal-1.ngrok.io 18196"), else pi@pupper5.local. Env overrides: PUPPER_HOST,
+# PUPPER_PORT, PUPPER_KEY (default ~/.ssh/pupper_ed25519), PUPPER_PASSWORD (used only by `setup`),
+# PUPPER_TUNNEL_PORTS (link only: these ports on this machine are localhost on the Pi too).
 
 set -euo pipefail
 
-HOST="${PUPPER_HOST:-pi@pupper5.local}"
+SAVED=$(cat "$HOME/.config/pupper/ssh" 2>/dev/null || true)
+HOST="${PUPPER_HOST:-$(echo "$SAVED" | awk '{print $1}')}"; HOST="${HOST:-pi@pupper5.local}"
+PORT="${PUPPER_PORT:-$(echo "$SAVED" | awk '{print $2}')}"; PORT="${PORT:-22}"
 KEY="${PUPPER_KEY:-$HOME/.ssh/pupper_ed25519}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${PUPPER_PORT:-22}"
 REMOTE_REPO="pupper-hackathon"
 SCRATCH="/tmp/pup"
 
@@ -78,11 +80,12 @@ case "$cmd" in
   setup) setup ;;
   shell) remote_tty ;;
   sh)    [ $# -gt 0 ] || die "usage: pup sh <cmd...>"; remote "$*" ;;
-  tty)   [ $# -gt 0 ] || die "usage: pup tty <cmd...>"
-         # its own connection (forwards need it), and it fails if a forward can't be set up
-         fwd=(-o ControlPath=none -o ExitOnForwardFailure=yes)
+  tty)   [ $# -gt 0 ] || die "usage: pup tty <cmd...>"; remote_tty "$*" ;;
+  link)  # its own connection (forwards need one); it ends if a forward can't be set up or the
+         # Pi stops answering, so whoever runs it can start it again (tools/brain_on_mac.sh does)
+         fwd=(-N -o ControlPath=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
          for p in ${PUPPER_TUNNEL_PORTS:-}; do fwd+=(-R "$p:localhost:$p"); done
-         ssh -t "${fwd[@]}" "${SSH_OPTS[@]}" "$HOST" "$*" ;;
+         ssh "${fwd[@]}" "${SSH_OPTS[@]}" "$HOST" ;;
   sudo)  [ $# -gt 0 ] || die "usage: pup sudo <cmd...>"; remote "sudo bash -c $(printf '%q' "$*")" ;;
   run)   [ $# -gt 0 ] || die "usage: pup run <file> [args]"; remote "$(stage "$@")" ;;
   gui)   [ $# -gt 0 ] || die "usage: pup gui <file> [args]"; remote "$GUI_ENV $(stage "$@")" ;;

@@ -92,7 +92,7 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 │                        gemma_brain.py: the local brain (Gemma on the Mac); test_gemma_brain.py
 ├── web/                 the web app (face + debug view, Gemini Live client; services/soundMonitor.ts,
 │                        objectDetector.ts and robotEvents.ts are the hackathon's senses;
-│                        localBrain.ts is the face for the local brain, ?brain=local)
+│                        localBrain.ts is the face for the local brain)
 ├── notebooks/           Meet the Loop, plus training/ (the code used to train the tricks)
 ├── docs/                architecture notes and Peng Xu's write-up
 ├── run_pupper.sh        one command: on the Pupper, the kiosk (Gemini); on the Mac, the local brain
@@ -675,35 +675,43 @@ the eyes, since the eyes are a few calls a second at most.
 
 ## The local brain on a Mac
 
-The brain's heavy half on a Mac, the rest on the Pupper, over ssh: one command, on the Mac.
+The brain's heavy half (Gemma, whisper) runs on a Mac, the rest on the Pupper. One command:
 
 ```bash
-./run_pupper.sh          # or ./run_pupper.sh 50 for the speaker's volume; Ctrl+C stops everything
+./run_pupper.sh          # on the Mac, or on the Pupper; ./run_pupper.sh 50 for the speaker's volume
 ```
 
 ```
-  Mac (Apple silicon)                                Pupper (Pi 5)
-  Ollama + Gemma 4 26B     :11435   <~~ ssh ~~~>      robot/server.py :8000 (localhost only)
-  whisper.cpp (Metal)      :8178                     robot/gemma_brain.py, mic, speaker, Piper
+  Mac (Apple silicon)                                  Pupper (Pi 5)
+  Ollama + Gemma 4 26B     :11435   ~~ ssh link ~~>    localhost:11435, :8178
+  whisper.cpp (Metal)      :8178                       robot/server.py, gemma_brain.py, face, mic, speaker
 ```
 
-What it does, in order (`tools/brain_on_mac.sh`; `run_pupper.sh` runs it on a Mac):
+The Pupper can't reach the Mac by itself (other WiFi, ngrok), so the Mac links its servers to it:
+an ssh connection, kept up in the background, that makes the two ports `localhost` on the Pupper.
 
-1. Checks it can reach the Pupper over ssh, and copies this checkout to it (`tools/pup sync`), so
-   the Pupper runs exactly what you see. Nothing else starts if the Pupper can't be reached.
-2. Starts an Ollama of its own on port 11435 (this Mac only), with the context the
-   brain needs (16k tokens) and Gemma kept loaded. An Ollama app you already run is left alone:
-   they share the downloaded models. Both servers reach the Pupper through the ssh connection
-   (tunnels), so the Mac and the Pupper don't need the same network: venue WiFi or ngrok both work.
-3. Starts whisper.cpp's server on the Mac's GPU (installing it with Homebrew, and its `base.en`
-   model, the first time).
-4. Runs `./run_pupper.sh` on the Pupper with the brain pointed at the Mac. There it checks it can
-   reach Gemma and whisper (`gemma_brain.py --check --voice`) before anything starts, installs
-   Piper the first time (`robot/setup_voice.sh`), starts the robot with the kiosk as the brain's
-   face (`robot/start.sh --face`) and the eyes asking the Mac's Gemma, then runs the brain:
-   Pupper's mic, whisper, Gemma, Piper, Pupper's speaker.
+**On the Mac**, `./run_pupper.sh` (`tools/brain_on_mac.sh`):
 
-**The face works as with Gemini.** The kiosk opens the app with `?brain=local`
+1. Finds the Pupper over ssh with the address saved in `~/.config/pupper/ssh` (`pi@host port`).
+   When that stops working (a new ngrok address), it asks once for the ssh command you use and
+   saves it. Then it copies this checkout to `~/pupper-hackathon` on the Pupper (`tools/pup sync`).
+2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11435
+   (16k context, Gemma kept loaded; an Ollama app you already run is left alone, they share the
+   models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `base.en` model,
+   the first time). Both listen on the Mac only.
+3. Starts the link and checks the Pupper sees both servers through it.
+4. Runs `./run_pupper.sh` on the Pupper (below).
+
+Ctrl+C stops the robot. The servers and the link keep running (until the Mac sleeps or restarts),
+so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_mac.sh stop` ends them.
+
+**On the Pupper**, `./run_pupper.sh` checks it can reach Gemma and whisper through the link
+(`gemma_brain.py --check --voice`; if not, it says to run `./run_pupper.sh` on the Mac and starts
+nothing), installs Piper the first time (`robot/setup_voice.sh`), starts the robot with the kiosk as
+the brain's face (`robot/start.sh --face`) and the eyes asking the Mac's Gemma, then runs the brain:
+Pupper's mic, whisper, Gemma, Piper, Pupper's speaker. There is no Gemini Live on this branch.
+
+**The face works as with Gemini.** The kiosk opens the app as the brain's face
 (`web/services/localBrain.ts`): no Gemini, no key, no WAKE PUPPER button. The brain posts what it
 is doing (`POST /brain/state`: listening, speaking, the caption), and the face shows it: awake
 while the brain runs, a moving mouth and captions while Pupper talks. The app's own jobs run as
@@ -712,15 +720,10 @@ the on-device object detector on the camera, and reminders. A due reminder's car
 face, and the app hands it to the brain to say (`POST /brain/announce`, an event the brain reads
 like any other). Without a face, the brain claims due reminders itself, a minute late.
 
-Ctrl+C on the Mac stops the brain and the robot (`robot/stop.sh`), and the Mac's servers. So does
-the ssh connection dropping. Run it with Pupper on the floor and a hand near the e-stop: it moves
-when you ask it to.
+Ctrl+C stops the brain and the robot (`robot/stop.sh`); so does the ssh connection dropping. Run
+it with Pupper on the floor and a hand near the e-stop: it moves when you ask it to.
 
 Once per laptop: `./tools/pup setup` (the ssh key) and Ollama (`brew install ollama` or the app).
-If `pupper5.local` doesn't resolve: `PUPPER_HOST=pi@<the Pupper's IP> ./run_pupper.sh`. Through an ngrok
-tunnel: `PUPPER_HOST=pi@4.tcp.us-cal-1.ngrok.io PUPPER_PORT=18196 ./run_pupper.sh` (the address ngrok
-gives). Run on the Pupper itself, `./run_pupper.sh` only says to start from the Mac
-(`PUPPER_BRAIN=gemini` there starts the Gemini Live app instead).
 
 **The model: `gemma4:26b`.** A mixture of experts with 4B parameters active per token, so it is
 fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. Until it is pulled

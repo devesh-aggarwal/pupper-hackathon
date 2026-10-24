@@ -2,7 +2,7 @@
 # Start Gemini Pupper on the robot.
 #   robot/start.sh            robot stack + robot server (use from a laptop through an SSH tunnel)
 #   robot/start.sh --kiosk    also show the app full-screen on the robot, using its mic and speaker
-#   robot/start.sh --face     the app full-screen as the local brain's face (?brain=local): no Gemini,
+#   robot/start.sh --face     the app full-screen as the local brain's face: no Gemini,
 #                             no key; robot/gemma_brain.py listens and talks (run_pupper.sh does this)
 # Stop everything with robot/stop.sh.
 set -uo pipefail

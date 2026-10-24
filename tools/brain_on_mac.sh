@@ -1,89 +1,82 @@
 #!/usr/bin/env bash
-# Pupper with its brain on this Mac, no cloud:   ./run_pupper.sh [volume 0-100]   (on the Mac; it runs this)
+# Pupper's brain on this Mac, no cloud:   ./run_pupper.sh [volume 0-100]   (on the Mac; it runs this)
 #
-#   1. the Pupper reachable over ssh, and this checkout copied to it (tools/pup sync)
-#   2. an Ollama of its own on this Mac (port 11435), with Gemma kept loaded; an Ollama app you
-#      already run is left alone (they share the downloaded models)
-#   3. whisper.cpp's server (speech to text, on the Mac's GPU, port 8178)
-#   4. ./run_pupper.sh on the Pupper with the brain pointed here: the robot, Pupper's mic and
-#      speaker, and robot/gemma_brain.py. Both servers reach the Pupper through the ssh
-#      connection (tunnels), so the Mac and the Pupper need not be on the same network.
+#   1. finds the Pupper over ssh (the address saved in ~/.config/pupper/ssh; asked for once when it
+#      changes, e.g. a new ngrok address) and copies this checkout to it (tools/pup sync)
+#   2. starts the brain's servers on this Mac, if they aren't up: Ollama with Gemma (port 11435) and
+#      whisper.cpp (speech to text, port 8178), for this Mac only
+#   3. starts the link: an ssh connection to the Pupper, kept up in the background, that makes
+#      those two ports localhost on the Pupper too (the Pupper can't reach this Mac by itself)
+#   4. runs ./run_pupper.sh on the Pupper: the robot, its face, its mic and speaker, the brain
 #
-# Ctrl+C stops all of it, the robot first. Gemma is gemma4:26b once it is pulled
-# (ollama pull gemma4:26b: about 17 GB, once); until then the best Gemma this Mac already has.
-# The first run also downloads whisper's model (about 150 MB). Nothing goes to the cloud.
-#   PUPPER_HOST=pi@<its IP> ./run_pupper.sh    when pupper5.local doesn't resolve
-#   PUPPER_HOST=pi@4.tcp.us-cal-1.ngrok.io PUPPER_PORT=18196 ./run_pupper.sh   through an ngrok tunnel
-#   PUPPER_GEMMA=gemma4:e4b ./run_pupper.sh    another model (pulled if missing)
+# Ctrl+C stops the robot. The servers and the link keep running, so ./run_pupper.sh on the Pupper
+# itself works too, until the Mac sleeps or restarts.   tools/brain_on_mac.sh stop   ends them.
+# Gemma is gemma4:26b once it is pulled (ollama pull gemma4:26b, about 17 GB, once); until then the
+# best Gemma this Mac already has. The first run also downloads whisper's model (about 150 MB).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 PUP="$HERE/tools/pup"
 WANT=gemma4:26b    # the best brain this Mac can run: a mixture of experts, 4B active per token
 WHISPER_MODEL=${PUPPER_WHISPER_MODEL:-base.en}
-OLLAMA_PORT=11435  # not 11434: the Ollama app may hold that, for this Mac only
-WHISPER_PORT=8178  # not whisper.cpp's 8080, which a dev server on the Mac often has
+OLLAMA_PORT=11435  # not 11434: the Ollama app may hold that
+WHISPER_PORT=8178
 CACHE=$HOME/.cache/pupper
 LOG=$CACHE/logs
-mkdir -p "$LOG"
+SAVED=$HOME/.config/pupper/ssh
+mkdir -p "$LOG" "$(dirname "$SAVED")"
 die() { echo "!! $*" >&2; exit 1; }
+alive() { [ -f "$CACHE/$1.pid" ] && kill -0 "$(cat "$CACHE/$1.pid")" 2>/dev/null; }
 
-PIDS=""         # the servers this script started (stopped at the end)
-PI_STARTED=0
-cleanup() {
-  [ $PI_STARTED = 1 ] && { "$PUP" sh "~/pupper-hackathon/robot/stop.sh" >/dev/null 2>&1 \
-    || echo "!! couldn't reach the Pupper to stop it: use the e-stop, then ./tools/pup sh pupper-hackathon/robot/stop.sh"; }
-  [ -n "$PIDS" ] && kill $PIDS 2>/dev/null
-  return 0
-}
-trap cleanup EXIT
-trap 'echo; echo "stopping..."; exit 130' INT TERM
-caffeinate -i -w $$ &  # the Mac must not sleep while it is Pupper's brain
+if [ "${1:-}" = stop ]; then
+  for name in link whisper ollama; do alive $name && kill "$(cat "$CACHE/$name.pid")" && echo "stopped $name"; rm -f "$CACHE/$name.pid"; done
+  pkill -f "ssh .*-R $OLLAMA_PORT:localhost:$OLLAMA_PORT" 2>/dev/null
+  exit 0
+fi
 
-# --- 1. the Pupper, first: nothing heavy starts if it can't be reached
-"$PUP" sh true >/dev/null 2>&1 || die "can't reach ${PUPPER_HOST:-pi@pupper5.local} over ssh. Once per laptop: ./tools/pup setup.
-   If pupper5.local doesn't resolve: PUPPER_HOST=pi@<its IP> ./run_pupper.sh, or through ngrok:
-   PUPPER_HOST=pi@<ngrok host> PUPPER_PORT=<ngrok port> ./run_pupper.sh"
+# --- 1. the Pupper
+reach() { "$PUP" sh true >/dev/null 2>&1; }
+if ! reach; then
+  [ -t 0 ] || die "can't reach the Pupper over ssh ($(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local))"
+  echo "Can't reach the Pupper at $(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local)."
+  read -rp "Paste the ssh command you use to reach it (e.g. ssh -p 18196 pi@4.tcp.us-cal-1.ngrok.io): " cmd
+  port=$(echo "$cmd" | grep -oE -- '-p *[0-9]+' | grep -oE '[0-9]+'); host=$(echo "$cmd" | grep -oE '[^ ]+@[^ ]+' | head -1)
+  [ -n "$host" ] || die "no user@host in that"
+  echo "$host ${port:-22}" > "$SAVED"
+  reach || die "still can't reach $host (port ${port:-22}). Once per laptop: ./tools/pup setup"
+fi
+echo "Pupper: $(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local)"
 "$PUP" sync >/dev/null || die "copying this checkout to the Pupper failed (./tools/pup sync)"
-echo "Pupper: ${PUPPER_HOST:-pi@pupper5.local}${PUPPER_PORT:+ port $PUPPER_PORT}, running this checkout (~/pupper-hackathon)"
 
-# --- 2. Ollama of our own, on the network, with Gemma
-ollama_up() { curl -sf -m 2 "http://127.0.0.1:$OLLAMA_PORT/api/version" >/dev/null; }
+# --- 2. the brain's servers (they outlive this script: the Pupper may start on its own later)
+export OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT  # this Mac only: the link carries it to the Pupper
+ollama_up() { curl -sf -m 2 "http://$OLLAMA_HOST/api/version" >/dev/null; }
 command -v ollama >/dev/null || die "no Ollama: brew install ollama (or ollama.com/download)"
 if ! ollama_up; then
-  # On the network; the context the brain asks for (so the eyes' requests share it and nothing
-  # reloads); kept loaded; two at a time, so the eyes don't push the brain's prompt out of the cache.
-  OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_KEEP_ALIVE=-1 OLLAMA_NUM_PARALLEL=2 \
-    nohup ollama serve > "$LOG/ollama.log" 2>&1 &
-  PIDS="$PIDS $!"
+  # The context the brain asks for (so the eyes' requests share it and nothing reloads), kept
+  # loaded, two at a time (the eyes don't push the brain's prompt out of the cache).
+  OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_KEEP_ALIVE=-1 OLLAMA_NUM_PARALLEL=2 nohup ollama serve > "$LOG/ollama.log" 2>&1 &
+  echo $! > "$CACHE/ollama.pid"
   for _ in $(seq 20); do ollama_up && break; sleep 1; done
-  ollama_up || die "Ollama didn't come up on port $OLLAMA_PORT (log $LOG/ollama.log)"
+  ollama_up || die "Ollama didn't start (log $LOG/ollama.log)"
+  nohup caffeinate -i -w "$(cat "$CACHE/ollama.pid")" >/dev/null 2>&1 &  # no sleeping while it's the brain
 fi
-echo "Ollama: on port $OLLAMA_PORT (log $LOG/ollama.log)"
-export OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT  # for the ollama commands below
-MODEL=${PUPPER_GEMMA:-$WANT}
-if ! ollama show "$MODEL" >/dev/null 2>&1; then
-  # The default isn't pulled: the best Gemma already here (robot/gemma_brain.py's own choice), so a
-  # slow network doesn't mean no brain; pull the default when the network allows.
+if ! ollama show "$WANT" >/dev/null 2>&1; then
   HAVE=$(cd "$HERE" && python3 -c 'import sys; sys.path.insert(0, "robot"); import gemma_brain as g; print(g.pick_model(sys.argv[1:]) or "")' \
          $(ollama list 2>/dev/null | awk 'NR > 1 {print $1}'))
-  if [ -z "${PUPPER_GEMMA:-}" ] && [ -n "$HAVE" ]; then
+  if [ -n "$HAVE" ]; then
     echo "Gemma: $WANT isn't pulled yet, so $HAVE for now (the better brain: ollama pull $WANT, about 17 GB)"
-    MODEL=$HAVE
   else
-    echo "pulling $MODEL (once)..."
-    ollama pull "$MODEL" || die "couldn't pull $MODEL. Gemma 4 needs a recent Ollama: brew upgrade ollama, or update the app"
+    echo "pulling $WANT (once, about 17 GB)..."
+    ollama pull "$WANT" || die "couldn't pull $WANT. Gemma 4 needs a recent Ollama: brew upgrade ollama, or update the app"
   fi
 fi
-echo "Gemma: $MODEL"
 
-# --- 3. whisper.cpp's server, on the network
 whisper_up() { curl -sf -m 2 -o /dev/null "http://127.0.0.1:$WHISPER_PORT/"; }
 if ! whisper_up; then
   if ! command -v whisper-server >/dev/null; then
     command -v brew >/dev/null || die "no whisper-server and no Homebrew (brew.sh): install one, then brew install whisper.cpp"
     echo "installing whisper.cpp (brew install whisper.cpp, once)..."
     HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper.cpp >/dev/null || die "brew install whisper.cpp failed"
-    command -v whisper-server >/dev/null || die "Homebrew's whisper.cpp has no whisper-server: build it from github.com/ggml-org/whisper.cpp"
   fi
   WM=$CACHE/ggml-$WHISPER_MODEL.bin
   if [ ! -f "$WM" ]; then
@@ -93,13 +86,28 @@ if ! whisper_up; then
       && mv "$WM.part" "$WM" || die "the whisper model download failed"
   fi
   nohup whisper-server -m "$WM" -l en --host 127.0.0.1 --port $WHISPER_PORT > "$LOG/whisper.log" 2>&1 &
-  PIDS="$PIDS $!"
+  echo $! > "$CACHE/whisper.pid"
   for _ in $(seq 30); do whisper_up && break; sleep 1; done
-  whisper_up || die "whisper-server didn't come up on port $WHISPER_PORT (log $LOG/whisper.log)"
+  whisper_up || die "whisper-server didn't start (log $LOG/whisper.log)"
 fi
-echo "whisper: on port $WHISPER_PORT ($WHISPER_MODEL, log $LOG/whisper.log)"
+echo "brain: Ollama :$OLLAMA_PORT, whisper :$WHISPER_PORT (logs in $LOG)"
 
-# --- 4. the Pupper: ./run_pupper.sh there, with the brain pointed here
+# --- 3. the link: the two ports on the Pupper, through ssh, reconnecting whenever it drops
+pupper_sees_brain() { "$PUP" sh "curl -sf -m 3 localhost:$OLLAMA_PORT/api/version >/dev/null && curl -sf -m 3 -o /dev/null localhost:$WHISPER_PORT/" >/dev/null 2>&1; }
+if ! alive link; then
+  nohup bash -c "while true; do
+      PUPPER_TUNNEL_PORTS='$OLLAMA_PORT $WHISPER_PORT' '$PUP' link
+      sleep 3
+    done" > "$LOG/link.log" 2>&1 &
+  echo $! > "$CACHE/link.pid"
+fi
+for _ in $(seq 20); do pupper_sees_brain && break; sleep 1; done
+pupper_sees_brain || die "the Pupper can't see the brain through the link (log $LOG/link.log)"
+echo "link: up (the Pupper reaches the brain at localhost:$OLLAMA_PORT and :$WHISPER_PORT)"
+
+# --- 4. the Pupper
 echo
-PI_STARTED=1
-PUPPER_TUNNEL_PORTS="$OLLAMA_PORT $WHISPER_PORT" "$PUP" tty "cd ~/pupper-hackathon && PUPPER_OLLAMA=http://localhost:$OLLAMA_PORT PUPPER_WHISPER=http://localhost:$WHISPER_PORT PUPPER_GEMMA=$MODEL ./run_pupper.sh $*"
+"$PUP" tty "cd ~/pupper-hackathon && ./run_pupper.sh $*"
+"$PUP" sh "~/pupper-hackathon/robot/stop.sh" >/dev/null 2>&1 \
+  || echo "!! couldn't reach the Pupper to stop it: use the e-stop, then ./tools/pup sh pupper-hackathon/robot/stop.sh"
+echo "The brain and the link keep running: ./run_pupper.sh on the Pupper works too. To end them: tools/brain_on_mac.sh stop"
