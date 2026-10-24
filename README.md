@@ -402,8 +402,8 @@ is. Two behaviors use it:
 above knows 80 classes and nothing about distance, so on its own it cannot see chair legs, cables or
 shoes. The eyes service is a second pair of eyes that runs beside the robot server, on a laptop on
 the same network (fast) or on the Pi (slower). A few times a second it fetches the camera frame the
-server already serves (`GET /camera/image`), runs a monocular depth model on it (Depth Anything V2
-Small, ONNX, CPU) and posts a *free-space summary* to `POST /vision/freespace`: for five strips of
+server already serves (`GET /camera/image`), runs a monocular depth model on it (Distill-Any-Depth
+Small, ONNX, CPU; see *The depth model* below) and posts a *free-space summary* to `POST /vision/freespace`: for five strips of
 the view cut by bearing (within 15 degrees of straight on, 15 to 45, and 45 to 80 on each side),
 where the nearest thing standing on the floor meets the floor. The depth model's output is relative
 (an unknown scale and offset), so the distance comes from geometry, not from the model's numbers: on
@@ -479,7 +479,7 @@ Running it, from a laptop (one tunnel both ways: the frames come down, `/look` g
 python3 -m pip install -r vision/requirements.txt          # numpy, pillow, onnxruntime
 ollama pull gemma3:4b                                        # once; a vision model, on-device
 ssh -N -L 8000:localhost:8000 -R 8100:localhost:8100 pi@pupper5.local
-python3 vision/eyes.py --fetch-depth-model                   # first time: downloads the ~99 MB model
+python3 vision/eyes.py --fetch-depth-model                   # first time: downloads the ~101 MB model
 python3 vision/eyes.py                                       # then: depth at 5 Hz, Gemma on demand
 python3 vision/eyes.py --no-gemma                            # depth only (no Ollama)
 curl localhost:8100/health                                   # what it sees, and how fast
@@ -492,6 +492,49 @@ stays out of the way, `go_to` falls back to the COCO detector, and `look` says i
 Speeds: depth takes about 60 ms a frame at 252 px on a laptop (Apple Silicon CPU), so 5 Hz is easy,
 and 320-350 ms on the Pi 5. `gemma3:4b` through Ollama takes 1.6 s for a yes/no question and 2.2 s
 for a box or a description.
+
+*The depth model.* The default is **Distill-Any-Depth Small** (`--depth-model-name
+distill-any-depth-small`). It is the same network as Depth Anything V2 Small: the same 24.8M
+parameters, inputs and outputs. It was trained by distilling Depth Anything V2 Large into it
+([Distill Any Depth](https://arxiv.org/abs/2502.19204), 2025). The free-space rule doesn't depend on
+the model's scale or offset, so it reads this model's output the same way.
+
+The ONNX file was checked against the official PyTorch weights, to within 1.3e-5. Measured on
+Middlebury's ground-truth depth (11 scenes), against Depth Anything V2 Small:
+
+| Input size | Distill-Any-Depth error (AbsRel) | Depth Anything V2 error (AbsRel) |
+| --- | --- | --- |
+| 224 px (the Pi's size) | 0.105 | 0.139 (about 25 % more) |
+| 252 px | 0.096 | 0.103 |
+
+It takes about 10 % more time a frame: 100 vs 90 ms at 224 px on an 8-core x86 CPU.
+
+How it is fetched and loaded:
+
+- **The download** is pinned to one commit and checked against its SHA-256. A file that doesn't match
+  is deleted, never used.
+- **No internet** (or a failed download): the eyes use the old `depth_anything_v2_small.onnx` if it is
+  in `vision/models/`, and say so in the log. A robot that had depth keeps it.
+- **Back to the old model:** `--depth-model-name depth-anything-v2-small`. For any other ONNX file,
+  use `--depth-model <file>`.
+- **Which model is running:** `curl localhost:8100/health` shows `depth_model`.
+
+Two options, both off by default:
+
+- `--depth-tta` averages each depth map with its mirror image's. That is about 7 % less error on
+  the same test, at twice the time a frame, so it suits a laptop's eyes, not the Pi's.
+- `--depth-provider coreml` (a Mac), `cuda` (a Jetson) or `auto` runs the model on the GPU or the
+  Neural Engine, falling back to the CPU. The thresholds were set on the CPU, and these weren't
+  tested here, so check a frame first.
+
+int8 quantization was tried and rejected: it is 25-35 % faster but loses whole far regions at 224 px.
+Depth Anything 3 Small is about 3x the work a frame, too slow for the Pi.
+
+**Before relying on it, re-check the threshold on the robot.** `BLOCK_NEARNESS` was set with the
+old model. Grab a frame (below) and run `--image` once with each model:
+`python3 vision/eyes.py --image frame.jpg --no-gemma` and the same with
+`--depth-model-name depth-anything-v2-small`. An empty floor should stay clear and a chair leg
+30-40 cm ahead should block with the new model too.
 
 To check the threshold on a new robot or room, grab a frame with
 `curl localhost:8000/camera/image -o frame.jpg` and run `python3 vision/eyes.py --image frame.jpg`:
@@ -654,7 +697,7 @@ Two models, two jobs, and they are kept apart on purpose:
 | | Model | Runs | Talks to the robot through |
 | --- | --- | --- | --- |
 | **The brain**: hears, talks, decides, calls tools | Gemini Live (cloud API), or for the hackathon Gemma 4 + whisper + Piper (local) | the browser (`web/`); or `robot/gemma_brain.py` on the Pi, with Gemma and whisper on the Mac or the Jetson | `GET /tools`, `POST /tools/<name>` |
-| **The eyes**: depth, "where is X in the frame", "what is around" | Depth Anything V2 Small (ONNX) + Gemma 3 4B (Ollama) | `vision/eyes.py`, on a laptop today, the Jetson tomorrow | `POST /vision/*`, `GET /vision/wanted`, `/look` |
+| **The eyes**: depth, "where is X in the frame", "what is around" | Distill-Any-Depth Small (ONNX) + Gemma 3 4B (Ollama) | `vision/eyes.py`, on a laptop today, the Jetson tomorrow | `POST /vision/*`, `GET /vision/wanted`, `/look` |
 | **The legs**: walking, tricks | the trained policies | ROS 2 on the Pi | `robot_api.py` |
 
 Why the split. The brain needs to be good at conversation, voice and tool use, and its job is one

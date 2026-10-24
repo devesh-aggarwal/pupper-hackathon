@@ -74,6 +74,77 @@ def blocked(st: dict[str, dict]) -> list[str]:
     return [n for n in STRIPS if st[n]["closest_m"] is not None and st[n]["closest_m"] <= STOP_M]
 
 
+def depth_models() -> None:
+    """The depth model's plumbing, with no model and no network: which file is loaded, the checked
+    download, where it runs, and the mirror averaging."""
+    import hashlib
+    import re
+    import tempfile
+
+    import eyes
+
+    print("\nEyes: the depth model (which one, the checked download, where it runs)")
+    pinned = all(re.search(r"/resolve/[0-9a-f]{40}/", m["url"]) and re.fullmatch(r"[0-9a-f]{64}", m["sha256"])
+                 for m in eyes.DEPTH_MODELS.values())
+    check("every depth model is pinned to one commit and has a SHA-256", pinned)
+    check("the default is distill-any-depth-small", eyes.DEFAULT_DEPTH_NAME == "distill-any-depth-small"
+          and eyes.DEFAULT_DEPTH_MODEL.name == eyes.DEPTH_MODELS["distill-any-depth-small"]["file"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        old = d / eyes.DEPTH_MODELS["depth-anything-v2-small"]["file"]
+        check("no model file at all: no depth (and no crash)", eyes.choose_depth_model(models_dir=d) == (None, eyes.DEFAULT_DEPTH_NAME))
+        old.write_bytes(b"old model")
+        check("only the old model there (no internet): it is used, by its name",
+              eyes.choose_depth_model(models_dir=d) == (old, "depth-anything-v2-small"))
+        new = d / eyes.DEPTH_MODELS["distill-any-depth-small"]["file"]
+        new.write_bytes(b"new model")
+        check("both there: the default", eyes.choose_depth_model(models_dir=d) == (new, "distill-any-depth-small"))
+        check("--depth-model-name picks the other", eyes.choose_depth_model("depth-anything-v2-small", models_dir=d)
+              == (old, "depth-anything-v2-small"))
+        mine = d / "mine.onnx"
+        check("--depth-model: a file that isn't there is no depth, not a fallback",
+              eyes.choose_depth_model(path=mine, models_dir=d) == (None, "mine"))
+
+        src = d / "served.onnx"
+        src.write_bytes(b"the real weights")
+        good = hashlib.sha256(b"the real weights").hexdigest()
+        dest = d / "got" / "model.onnx"
+        try:
+            eyes.fetch_depth_model(dest, src.as_uri(), "0" * 64)
+            refused = False
+        except ValueError:
+            refused = True
+        check("a download that doesn't match its SHA-256 is refused and deleted",
+              refused and not dest.exists() and not dest.with_suffix(".part").exists())
+        check("one that matches is kept", eyes.fetch_depth_model(dest, src.as_uri(), good) == dest and dest.read_bytes() == b"the real weights")
+
+    cpu, mac, nv = ["CPUExecutionProvider"], ["CoreMLExecutionProvider", "CPUExecutionProvider"], ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    check("provider cpu: the CPU only, even with an accelerator", eyes.onnx_providers("cpu", mac) == cpu)
+    check("provider auto on a Mac: CoreML, then the CPU", eyes.onnx_providers("auto", mac) == mac)
+    check("provider auto on a Jetson: CUDA, then the CPU", eyes.onnx_providers("auto", nv) == nv)
+    check("provider auto with nothing else: the CPU", eyes.onnx_providers("auto", cpu) == cpu)
+    check("provider coreml without CoreML: the CPU (with a warning)", eyes.onnx_providers("coreml", nv) == cpu)
+
+    class Session:  # a stand-in model: a ramp that rises to the right (a bias), plus the input's red channel
+        def run(self, _outputs, feeds):
+            x = feeds["pixel_values"]
+            return [np.linspace(0.0, 1.0, x.shape[-1])[None, None, :] + x[:, 0]]
+
+    dm = eyes.Depth.__new__(eyes.Depth)
+    dm.session, dm.input_name, dm.tta = Session(), "pixel_values", False
+    x = np.zeros((1, 3, 14, 28), dtype=np.float32)
+    x[0, 0, :, 3] = 1.0  # a bright column, left of centre
+    plain = dm.predict(x)
+    dm.tta = True
+    avg = dm.predict(x)
+    check("tta: the same shape as one pass", avg.shape == plain.shape == (14, 28), f"{avg.shape} {plain.shape}")
+    # The mirror pass, mirrored back, has the column in the same place and the ramp reversed: the
+    # average keeps the column (a real thing) and flattens the ramp (the model's left-right bias).
+    check("tta: things stay where they are, a left-right bias averages out", np.allclose(avg, 0.5 + x[0, 0]),
+          str(np.round(avg[0], 2)))
+
+
 def main() -> None:
     print("Eyes: free space from synthetic fisheye depth")
     d0 = floor()
@@ -133,6 +204,8 @@ def main() -> None:
     check("gating: one frame every 5 s while idle", next_period({"attention": False}, 5.0) == 1.0 / IDLE_HZ)
     check("gating: stand down while another eyes service posts", next_period({"attention": True, "others_posting": True}, 5.0) is None)
     check("gating: no status at all means full rate (the robot's reply decides, not a guess)", next_period({"attention": True}, 2.0) == 0.5)
+
+    depth_models()
 
     print()
     if FAIL:

@@ -12,7 +12,7 @@ follow mode on, a tool called in the last 10 s), once every 5 s while it is idle
 while another eyes service (a laptop's, the Jetson's) is posting, so the Pi stays cool:
 
   1. fetches the camera frame the robot server already serves (GET /camera/image),
-  2. runs a monocular depth model on it (Depth Anything V2 Small, ONNX, on the CPU) and posts a
+  2. runs a monocular depth model on it (Distill-Any-Depth Small, ONNX, on the CPU) and posts a
      free-space summary to POST /vision/freespace: for five vertical strips of the lower half of the
      frame, how close the nearest surface is. lab/hackathon_vision.py turns that into "blocked" and
      refuses or stops moves. This is class-agnostic: a chair leg, a cable, a shoe all count,
@@ -27,8 +27,9 @@ while another eyes service (a laptop's, the Jetson's) is posting, so the Pi stay
 
 Gemma runs in Ollama (https://ollama.com): ``ollama pull gemma3:4b`` (a vision model; on-device, no
 cloud), or, until the Jetson is here, through Google's API with the Gemini key (``--gemma-api``:
-gemini-3.5-flash-lite by default, cloud, so not for the final hackathon build). Depth needs the ONNX file (see
-fetch_depth_model() or --depth-model). Without the depth model this still does 3-5; without Gemma it
+gemini-3.5-flash-lite by default, cloud, so not for the final hackathon build). Depth needs the ONNX file
+(--fetch-depth-model downloads it, checked against its SHA-256; DEPTH_MODELS lists the models, and
+--depth-model takes any other file). Without the depth model this still does 3-5; without Gemma it
 still does 1-2.
 
 Install:  python3 -m pip install -r vision/requirements.txt
@@ -61,10 +62,46 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "lab"))
 import fisheye_geom  # noqa: E402  Lab 5's calibrated lens: pixel -> latitude/longitude, the row of a base
 
-DEFAULT_DEPTH_MODEL = HERE / "models" / "depth_anything_v2_small.onnx"
-# Depth Anything V2 Small, exported to ONNX by the onnx-community project (relative depth, ~99 MB fp32;
-# the quantized file, ~25 MB, is 'onnx/model_quantized.onnx' in the same repo and works too).
-DEPTH_MODEL_URL = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx"
+MODELS_DIR = HERE / "models"
+# The depth models this knows (--depth-model-name). Both are the same network: Depth Anything V2's
+# ViT-S encoder and DPT head, 24.8M parameters, relative inverse depth (bigger = closer), ONNX fp32,
+# input "pixel_values" (ImageNet-normalized, sides a multiple of 14), output "predicted_depth". So
+# they take the same time a frame, and freespace_from_closeness, which doesn't depend on the model's
+# scale or offset, reads either one. Each download is pinned to one commit and checked against its
+# SHA-256, so the file can't change under the robot.
+#
+# distill-any-depth-small (the default): the same network, trained by distillation from Depth
+#   Anything V2 Large ("Distill Any Depth", He et al. 2025, arXiv 2502.19204; official weights
+#   xingyang1/Distill-Any-Depth-Small-hf, MIT/Apache-2.0). The ONNX export below was checked against
+#   those official PyTorch weights: within 1.3e-5 at 224, 252, 168 x 336 and 518 px. On Middlebury
+#   2006 (11 scenes, ground-truth disparity, scale-and-shift aligned), against depth-anything-v2-small:
+#   AbsRel 0.105 vs 0.139 at 224 px (the Pi's size), 0.096 vs 0.103 at 252 px, delta1 0.889 vs 0.872
+#   at 252; about 10 % more time a frame (this export's graph, not the network).
+# depth-anything-v2-small: the model these eyes started with (onnx-community's export, also checked
+#   against the official weights). Used when the default isn't downloaded, so a Pupper without the
+#   internet keeps its depth sense.
+# Not used: int8 (ONNX dynamic quantization) is 25-35 % faster but unstable at 224 px (AbsRel 0.55 and
+# 1.6 on the same scenes: whole far regions collapse), which an obstacle rule can't have; Depth
+# Anything 3 Small is 80M parameters, about 3x the work a frame, too slow for the Pi.
+DEPTH_MODELS = {
+    "distill-any-depth-small": {
+        "file": "distill_any_depth_small.onnx",
+        "url": "https://huggingface.co/Neogenics1987/distill-any-depth-small-onnx/resolve/"
+               "096e9877c0e3c0d546d5c5983d1fe4ee27d6e437/distill-any-depth-small.onnx",
+        "sha256": "de544a9b6aedd88177a13dfa48309d832d3af914b378e250d9ca912a56855236",
+        "mb": 101,
+    },
+    "depth-anything-v2-small": {
+        "file": "depth_anything_v2_small.onnx",
+        "url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/"
+               "4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx",
+        "sha256": "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+        "mb": 99,
+    },
+}
+DEFAULT_DEPTH_NAME = "distill-any-depth-small"
+DEFAULT_DEPTH_MODEL = MODELS_DIR / DEPTH_MODELS[DEFAULT_DEPTH_NAME]["file"]
+DEPTH_MODEL_URL = DEPTH_MODELS[DEFAULT_DEPTH_NAME]["url"]
 DEPTH_INPUT = 252  # pixels, a multiple of 14 (the model's patch); 518 is the model's native size, 4x slower.
 # A laptop does 252 in 40 ms. The Pi 5 with the robot stack running needs 168 (--depth-size): 252 took
 # 1.9 s there, 168 about 0.8 s, and the floor rule only needs the row profile.
@@ -252,18 +289,53 @@ def freespace_from_closeness(closeness: np.ndarray, metric_depth: np.ndarray | N
     return out
 
 
-class Depth:
-    """Depth Anything V2 (relative) through onnxruntime. metric=True if the file is a metric model."""
+ACCELERATED = {"cuda": "CUDAExecutionProvider", "coreml": "CoreMLExecutionProvider"}
 
-    def __init__(self, model: Path, metric: bool = False, threads: int = 4, size: int = DEPTH_INPUT):
+
+def onnx_providers(choice: str, available: list[str]) -> list[str]:
+    """onnxruntime's providers for --depth-provider: cpu (the default, what the thresholds were set
+    with), cuda (a Jetson or an NVIDIA laptop), coreml (a Mac), or auto (the first of those this
+    onnxruntime has). The CPU always comes last, for whatever the accelerator can't run."""
+    wanted = list(ACCELERATED) if choice == "auto" else [choice] if choice in ACCELERATED else []
+    first = [ACCELERATED[w] for w in wanted if ACCELERATED[w] in available][:1]
+    if choice in ACCELERATED and not first:
+        log.warning("this onnxruntime has no %s (it has %s): depth runs on the CPU", ACCELERATED[choice], available)
+    return first + ["CPUExecutionProvider"]
+
+
+class Depth:
+    """A relative depth model (DEPTH_MODELS) through onnxruntime. metric=True if the file is a metric
+    model. tta: also run the mirror image and average the two (about 7 % less error on Middlebury,
+    twice the time a frame: for a laptop's eyes, not the Pi's)."""
+
+    def __init__(self, model: Path, metric: bool = False, threads: int = 4, size: int = DEPTH_INPUT,
+                 provider: str = "cpu", tta: bool = False, name: str = ""):
         import onnxruntime as ort  # here: the rest of the file works without it
 
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = threads
-        self.session = ort.InferenceSession(str(model), opts, providers=["CPUExecutionProvider"])
+        providers = onnx_providers(provider, ort.get_available_providers())
+        try:
+            self.session = ort.InferenceSession(str(model), opts, providers=providers)
+        except Exception as e:  # an accelerator that can't load this graph: the CPU always can
+            if providers == ["CPUExecutionProvider"]:
+                raise
+            log.warning("depth on %s failed (%s): on the CPU instead", providers[0], e)
+            self.session = ort.InferenceSession(str(model), opts, providers=["CPUExecutionProvider"])
         self.input_name = self.session.get_inputs()[0].name
-        self.metric = metric
+        self.metric, self.tta = metric, tta
+        self.name = name or Path(model).stem
+        self.providers = self.session.get_providers()
         self.size = size - size % 14  # the model wants a multiple of its 14 px patch
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        """The model's raw output (H x W) for one normalized NCHW batch of one; with tta, averaged with
+        the output for the mirror image, mirrored back."""
+        y = np.squeeze(self.session.run(None, {self.input_name: x})[0]).astype(np.float32)
+        if self.tta:
+            flipped = np.squeeze(self.session.run(None, {self.input_name: np.ascontiguousarray(x[..., ::-1])})[0])
+            y = 0.5 * (y + flipped[:, ::-1].astype(np.float32))
+        return y
 
     def closeness(self, image) -> tuple[np.ndarray, np.ndarray | None]:
         """(closeness map, metric depth map or None) at DEPTH_INPUT resolution."""
@@ -272,8 +344,7 @@ class Depth:
         im = image.convert("RGB").resize((self.size, self.size), Image.BILINEAR)
         x = (np.asarray(im, dtype=np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
         x = x.transpose(2, 0, 1)[None]
-        y = self.session.run(None, {self.input_name: x})[0]
-        y = np.squeeze(y).astype(np.float32)
+        y = self.predict(x)
         if self.metric:  # metres: closeness is 1/depth
             depth = np.maximum(y, 0.05)
             return 1.0 / depth, depth
@@ -780,6 +851,7 @@ class Eyes:
             def do_GET(self):
                 if self.path.startswith("/health"):
                     self._send(200, {"ok": True, "depth": eyes.depth is not None, "gemma": eyes.gemma is not None,
+                                     "depth_model": eyes.depth.name if eyes.depth else None,
                                      "detector": eyes.detector is not None, "detections": eyes.detections,
                                      "state": eyes.state, "source": eyes.source,
                                      "wanted": eyes.wanted, "freespace": eyes.summary, **eyes.stats})
@@ -809,16 +881,53 @@ class Eyes:
         return server
 
 
-def fetch_depth_model(path: Path = DEFAULT_DEPTH_MODEL, url: str = DEPTH_MODEL_URL) -> Path:
-    """Download the depth model once (about 99 MB) into vision/models/."""
+def sha256_of(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def fetch_depth_model(path: Path = DEFAULT_DEPTH_MODEL, url: str = DEPTH_MODEL_URL,
+                      sha256: str | None = DEPTH_MODELS[DEFAULT_DEPTH_NAME]["sha256"]) -> Path:
+    """Download a depth model once (about 100 MB) into vision/models/. With sha256, a download that
+    doesn't match is deleted and raises: a wrong file never becomes the robot's depth sense."""
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"downloading {url} -> {path} ...", file=sys.stderr)
     tmp = path.with_suffix(".part")
     urllib.request.urlretrieve(url, tmp)
+    if sha256 and sha256_of(tmp) != sha256:
+        tmp.unlink()
+        raise ValueError(f"{url} doesn't match its SHA-256 ({sha256[:12]}...): not used")
     tmp.rename(path)
     return path
+
+
+def choose_depth_model(name: str = DEFAULT_DEPTH_NAME, path: Path | None = None, fetch: bool = False,
+                       models_dir: Path = MODELS_DIR) -> tuple[Path | None, str]:
+    """The depth model to load: (its file, or None if there is none, and its name). A path given
+    (--depth-model) is used as it is. Otherwise the model called name, downloaded first with fetch;
+    if that file isn't there (no internet, a failed download), any other model in DEPTH_MODELS that
+    is, so a robot that had the old model keeps a depth sense."""
+    if path is not None:
+        return (path if path.exists() else None), path.stem
+    spec = DEPTH_MODELS[name]
+    if fetch:
+        try:
+            fetch_depth_model(models_dir / spec["file"], spec["url"], spec["sha256"])
+        except Exception as e:
+            log.warning("couldn't download the %s depth model (%s)", name, e)
+    for other in [name] + [n for n in DEPTH_MODELS if n != name]:
+        if (models_dir / DEPTH_MODELS[other]["file"]).exists():
+            if other != name:
+                log.warning("no %s depth model in %s: using %s, which is there", name, models_dir, other)
+            return models_dir / DEPTH_MODELS[other]["file"], other
+    return None, name
 
 
 def ollama_has(url: str, model: str) -> bool:
@@ -841,8 +950,13 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8100, help="where /look is served")
     ap.add_argument("--advertise", default="http://127.0.0.1:8100",
                     help="the url the robot uses to reach /look (127.0.0.1 works on the Pi, or through ssh -R 8100:localhost:8100)")
-    ap.add_argument("--depth-model", type=Path, default=DEFAULT_DEPTH_MODEL)
-    ap.add_argument("--fetch-depth-model", action="store_true", help="download the depth model if it is missing")
+    ap.add_argument("--depth-model-name", choices=list(DEPTH_MODELS), default=DEFAULT_DEPTH_NAME,
+                    help=f"which depth model (default {DEFAULT_DEPTH_NAME}; DEPTH_MODELS says why)")
+    ap.add_argument("--depth-model", type=Path, default=None, help="any other depth ONNX file, instead of --depth-model-name")
+    ap.add_argument("--fetch-depth-model", action="store_true", help="download the depth model if it is missing (about 100 MB)")
+    ap.add_argument("--depth-provider", choices=["cpu", "auto", "coreml", "cuda"], default="cpu",
+                    help="where the depth model runs: cpu (default), coreml (a Mac), cuda (a Jetson), auto (the first of those there is)")
+    ap.add_argument("--depth-tta", action="store_true", help="average each depth map with its mirror image's: less error, twice the time (a laptop, not the Pi)")
     ap.add_argument("--metric", action="store_true", help="the depth model outputs metres (a metric-indoor export)")
     ap.add_argument("--depth-size", type=int, default=DEPTH_INPUT, help="the depth model's input in pixels (a multiple of 14; the Pi: 168)")
     ap.add_argument("--no-depth", action="store_true")
@@ -869,13 +983,15 @@ def main() -> None:
 
     depth = None
     if not a.no_depth:
-        if a.fetch_depth_model:
-            fetch_depth_model(a.depth_model)
-        if a.depth_model.exists():
-            depth = Depth(a.depth_model, metric=a.metric, threads=a.threads, size=a.depth_size)
-            log.info("depth model %s (%s, %d px)", a.depth_model.name, "metric" if a.metric else "relative", depth.size)
+        path, name = choose_depth_model(a.depth_model_name, a.depth_model, a.fetch_depth_model)
+        if path:
+            depth = Depth(path, metric=a.metric, threads=a.threads, size=a.depth_size, provider=a.depth_provider,
+                          tta=a.depth_tta, name=name)
+            log.info("depth model %s (%s, %d px%s, on %s)", name, "metric" if a.metric else "relative", depth.size,
+                     ", mirror-averaged" if depth.tta else "", depth.providers[0])
         else:
-            log.warning("no depth model at %s: run with --fetch-depth-model (about 99 MB); depth is off", a.depth_model)
+            log.warning("no depth model %s: run with --fetch-depth-model (about 100 MB); depth is off",
+                        a.depth_model or MODELS_DIR / DEPTH_MODELS[name]["file"])
     detector = None
     if not a.no_detector:
         if a.fetch_detector_model:
@@ -932,9 +1048,10 @@ def main() -> None:
             for st in freespace_from_closeness(closeness, metric, a.hfov, circle_mask(depth.size) if circle[2] < 0.5 else None,
                                                a.cam_height, geom, im.size):
                 print(f"  {st['name']:>13}: " + ("floor only" if st["base_deg"] is None else
-                      f"surface base {st['base_deg']:5.1f} deg down the disc -> Lab 5 row {st['nearness']:.3f}"
-                      f" ({'blocked' if st['nearness'] is not None and st['nearness'] >= 0.68 else 'clear'})"))
-            print(f"  ({ms:.0f} ms; blocked when the base's Lab 5 row >= 0.68 of the image; the stop row is 0.794: lab/fisheye_geom.py)")
+                      f"surface base {st['base_deg']:5.1f} deg down the disc -> " + (
+                          "no Lab 5 row (outside the lens calibration)" if st["nearness"] is None else
+                          f"Lab 5 row {st['nearness']:.3f} ({'blocked' if st['nearness'] >= 0.68 else 'clear'})")))
+            print(f"  ({depth.name}, {ms:.0f} ms; blocked when the base's Lab 5 row >= 0.68 of the image; the stop row is 0.794: lab/fisheye_geom.py)")
         if gemma and a.look:
             print("  Gemma:", gemma.answer(jpeg, a.look))
         elif gemma:
