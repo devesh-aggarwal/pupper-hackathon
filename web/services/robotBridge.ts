@@ -194,6 +194,16 @@ class RobotBridge {
     return this.request('/alerts/sound', 'POST', { above_db: aboveDb, level_db: levelDb, duration_s: durationS });
   }
 
+  /** The local brain (robot/gemma_brain.py): listening, speaking, the caption, and how fresh that is. */
+  async getBrainState(): Promise<{ listening: boolean; speaking: boolean; caption: string | null; age_s: number | null } | null> {
+    return this.request('/brain/state', 'GET');
+  }
+
+  /** A due reminder for the local brain to say (it arrives there as an event). */
+  async announceToBrain(text: string) {
+    return this.request('/brain/announce', 'POST', { text });
+  }
+
   /** What the on-device object detector sees in the current camera frame. */
   async postDetections(frame: DetectionFrame) {
     return this.request('/vision/detections', 'POST', frame);

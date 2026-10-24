@@ -21,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -453,6 +454,16 @@ class SpeechIn(BaseModel):
     text: str
 
 
+class BrainStateIn(BaseModel):
+    listening: bool = True  # the mic is open (it closes while Pupper talks)
+    speaking: bool = False
+    caption: str | None = None  # what Pupper is saying now
+
+
+class AnnounceIn(BaseModel):
+    text: str
+
+
 class MemoryScope(BaseModel):
     scope: str = "profile"  # or "all"
 
@@ -554,6 +565,31 @@ def transcript_post(req: SpeechIn):
 def transcript_get(n: int = 50):
     """The last n entries of today's session log (lab/hackathon_log.py)."""
     return {"entries": behaviors.tail(n), "file": str(behaviors.transcript_file())}
+
+
+# The local brain (robot/gemma_brain.py) has no browser of its own: it posts what it is doing, and
+# the face (the web app with ?brain=local) shows it, as it shows Gemini Live's.
+BRAIN = {"listening": False, "speaking": False, "caption": None, "time": 0.0}
+
+
+@app.post("/brain/state")
+def brain_state_post(req: BrainStateIn):
+    """The local brain: listening, speaking and the caption, now (posted on each change, and every second)."""
+    BRAIN.update(listening=req.listening, speaking=req.speaking, caption=req.caption, time=time.time())
+    return {"success": True}
+
+
+@app.get("/brain/state")
+def brain_state_get():
+    """What the face shows for the local brain; age_s says how long since it last spoke up (null: never)."""
+    return {**BRAIN, "age_s": round(time.time() - BRAIN["time"], 1) if BRAIN["time"] else None}
+
+
+@app.post("/brain/announce")
+def brain_announce(req: AnnounceIn):
+    """A due reminder the face claimed, for the local brain to say: it arrives as an event, like a sound alert."""
+    behaviors.EVENTS.emit("reminder", req.text[:300], for_gemini=req.text)
+    return {"success": True, "message": "told the brain"}
 
 
 @app.get("/memory")

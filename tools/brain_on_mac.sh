@@ -91,7 +91,8 @@ if ! whisper_up; then
   WM=$CACHE/ggml-$WHISPER_MODEL.bin
   if [ ! -f "$WM" ]; then
     echo "downloading whisper's $WHISPER_MODEL model (once)..."
-    curl -fL --progress-bar -o "$WM.part" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$WHISPER_MODEL.bin" \
+    # -C -: a download cut short (a network change) picks up where it stopped, on retry or next run
+    curl -fL -C - --retry 5 --retry-delay 2 --progress-bar -o "$WM.part" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$WHISPER_MODEL.bin" \
       && mv "$WM.part" "$WM" || die "the whisper model download failed"
   fi
   nohup whisper-server -m "$WM" -l en --host 0.0.0.0 --port $WHISPER_PORT > "$LOG/whisper.log" 2>&1 &

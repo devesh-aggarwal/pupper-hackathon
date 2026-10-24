@@ -2,12 +2,15 @@
 # Start Gemini Pupper on the robot.
 #   robot/start.sh            robot stack + robot server (use from a laptop through an SSH tunnel)
 #   robot/start.sh --kiosk    also show the app full-screen on the robot, using its mic and speaker
+#   robot/start.sh --face     the app full-screen as the local brain's face (?brain=local): no Gemini,
+#                             no key; robot/gemma_brain.py listens and talks (run_pupper.sh does this)
 # Stop everything with robot/stop.sh.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(dirname "$HERE")
 LOG=/tmp/gemini-pupper; mkdir -p $LOG
 KEY_FILE=${GEMINI_KEY_FILE:-$HOME/.config/gemini-pupper/api_key}
-KIOSK=0; [ "${1:-}" = "--kiosk" ] && KIOSK=1
+KIOSK=0; FACE=0
+case "${1:-}" in --kiosk) KIOSK=1 ;; --face) KIOSK=1 FACE=1 ;; esac
 free_port() {  # stop whatever is serving port 8000 (an older robot server)
   local pids; pids=$(ss -ltnpH "sport = :8000" 2>/dev/null | grep -oP "pid=\\K[0-9]+" | sort -u)
   [ -n "$pids" ] && kill $pids 2>/dev/null && sleep 1
@@ -16,7 +19,7 @@ free_port() {  # stop whatever is serving port 8000 (an older robot server)
 ROS="source /opt/ros/jazzy/setup.bash; source $HOME/pupperv3-monorepo/ros2_ws/install/local_setup.bash; export ROS_LOCALHOST_ONLY=1"
 
 [ -f "$REPO/web/dist/index.html" ] || { echo "Missing $REPO/web/dist: run robot/setup.sh first (it builds the web app)"; exit 1; }
-if [ $KIOSK = 1 ] && [ ! -s "$KEY_FILE" ]; then
+if [ $KIOSK = 1 ] && [ $FACE = 0 ] && [ ! -s "$KEY_FILE" ]; then
   echo "Missing $KEY_FILE. Run robot/setup.sh, or create it with:  mkdir -p $(dirname $KEY_FILE) && (umask 077; cat > $KEY_FILE)"; exit 1
 fi
 
@@ -75,8 +78,12 @@ pkill -f "[g]emini-pupper-kiosk" 2>/dev/null; pkill -f "[r]obot/kiosk.py" 2>/dev
 amixer -q sset Master 100% 2>/dev/null; wpctl set-volume @DEFAULT_SINK@ 1.0 2>/dev/null
 setsid nohup chromium --ozone-platform=wayland --disable-features=WebRtcAllowInputVolumeAdjustment --kiosk --noerrdialogs --disable-infobars --no-first-run \
   --password-store=basic --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required \
-  --remote-debugging-port=9222 --user-data-dir=$HOME/.cache/gemini-pupper-kiosk http://localhost:8000 \
+  --remote-debugging-port=9222 --user-data-dir=$HOME/.cache/gemini-pupper-kiosk "http://localhost:8000/$([ $FACE = 1 ] && echo '?brain=local')" \
   > $LOG/chromium.log 2>&1 < /dev/null &
-setsid nohup python3 -u $HERE/kiosk.py "$KEY_FILE" > $LOG/kiosk.log 2>&1 < /dev/null &
-sleep 12; tail -2 $LOG/kiosk.log
+if [ $FACE = 1 ]; then  # the face only: nothing presses WAKE PUPPER, so Gemini never connects
+  sleep 5
+else
+  setsid nohup python3 -u $HERE/kiosk.py "$KEY_FILE" > $LOG/kiosk.log 2>&1 < /dev/null &
+  sleep 12; tail -2 $LOG/kiosk.log
+fi
 echo "ready. Stop with robot/stop.sh"

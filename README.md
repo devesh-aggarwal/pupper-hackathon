@@ -93,7 +93,8 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 │                        (test_tools.py: the lab's tests; test_hackathon.py: the hackathon's)
 │                        gemma_brain.py: the local brain (Gemma on the Jetson); test_gemma_brain.py
 ├── web/                 the web app (face + debug view, Gemini Live client; services/soundMonitor.ts,
-│                        objectDetector.ts and robotEvents.ts are the hackathon's senses)
+│                        objectDetector.ts and robotEvents.ts are the hackathon's senses;
+│                        localBrain.ts is the face for the local brain, ?brain=local)
 ├── notebooks/           Meet the Loop, plus training/ (the code used to train the tricks)
 ├── docs/                architecture notes and Peng Xu's write-up
 ├── run_pupper.sh        one command: on the Pupper, the kiosk (Gemini); on the Mac, the local brain
@@ -699,9 +700,18 @@ What it does, in order (`tools/brain_on_mac.sh`; `run_pupper.sh` runs it on a Ma
    model, the first time).
 4. Runs `./run_pupper.sh` on the Pupper with the brain pointed at the Mac. There it checks it can
    reach Gemma and whisper (`gemma_brain.py --check --voice`) before anything starts, installs
-   Piper the first time (`robot/setup_voice.sh`), starts the robot **without the kiosk** (its app
-   would connect Gemini Live and hold the mic) with the eyes asking the Mac's Gemma, then runs the
-   brain: Pupper's mic, whisper, Gemma, Piper, Pupper's speaker.
+   Piper the first time (`robot/setup_voice.sh`), starts the robot with the kiosk as the brain's
+   face (`robot/start.sh --face`) and the eyes asking the Mac's Gemma, then runs the brain:
+   Pupper's mic, whisper, Gemma, Piper, Pupper's speaker.
+
+**The face works as with Gemini.** The kiosk opens the app with `?brain=local`
+(`web/services/localBrain.ts`): no Gemini, no key, no WAKE PUPPER button. The brain posts what it
+is doing (`POST /brain/state`: listening, speaking, the caption), and the face shows it: awake
+while the brain runs, a moving mouth and captions while Pupper talks. The app's own jobs run as
+before: the screen's cards (`show_text`, sound alerts, found it), the sound monitor on the mic,
+the on-device object detector on the camera, and reminders. A due reminder's card shows on the
+face, and the app hands it to the brain to say (`POST /brain/announce`, an event the brain reads
+like any other). Without a face, the brain claims due reminders itself, a minute late.
 
 Ctrl+C on the Mac stops the brain and the robot (`robot/stop.sh`), and the Mac's servers. So does
 the ssh connection dropping. Run it with Pupper on the floor and a hand near the e-stop: it moves
@@ -736,8 +746,7 @@ Things to know:
   (client isolation): the Pupper's check then fails with that hint. Use a phone hotspot.
 - **macOS may ask** to let `ollama` and `whisper-server` accept incoming connections: allow it.
   While this runs, both are reachable by anyone on the same network.
-- **No face on the screen.** The kiosk is off in this mode; the Mac's terminal shows what Pupper
-  hears, says and does.
+- **The Mac's terminal** shows what Pupper hears, says and does, besides the face.
 - **Is a laptop "on-device"?** The model runs on the table in front of you, with no cloud. Check with
   the organizers that this counts; the Jetson setup below is the stricter answer.
 
@@ -803,8 +812,8 @@ python3 robot/gemma_brain.py --only stand_up,lie_down,stop,move,turn,play_trick,
 ```
 
 With `--robot`, Pupper is on the ground with a hand near the e-stop, as always. Start the robot
-**without the kiosk** (`robot/start.sh`, or `./run_pupper.sh --laptop`): the kiosk's web app would
-connect Gemini Live (a second brain, and cloud) and hold the mic. Saying just "stop" (or "Pupper,
+with the face only (`robot/start.sh --face`), never `--kiosk`: that kiosk connects Gemini Live (a
+second brain, and cloud). Saying just "stop" (or "Pupper,
 stop") stops the robot at once, without waiting for Gemma. The gamepad's e-stop works whatever the
 brain does.
 
@@ -822,7 +831,6 @@ What it does not do yet, compared with Gemini Live:
   heard mid-sentence; the e-stop is.
 - **Slower turns**: the end of your sentence (0.8 s of quiet), whisper, then Gemma. `--check`
   prints Gemma's times; the first call after a start loads the model (10-30 s).
-- **No captions on Pupper's screen**: they come from the web app. The terminal shows both sides.
 - **Not tried on a real Jetson yet.** The loop is tested against a fake Ollama
   (`python3 lab/test.py brain`), and the setup scripts follow Ollama's and whisper.cpp's docs.
   Run `--check` first, and expect to adjust `jetson/setup.sh` on the day (the Thor's JetPack 7

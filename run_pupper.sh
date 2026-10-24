@@ -12,7 +12,8 @@
 #
 # The local brain (no cloud): run ./run_pupper.sh on the Mac instead. It starts Gemma and whisper
 # there (tools/brain_on_mac.sh) and then this script on the Pupper, with PUPPER_OLLAMA set: then
-# there is no kiosk, and robot/gemma_brain.py listens and talks through Pupper's mic and speaker.
+# the kiosk is the brain's face (?brain=local: no Gemini), and robot/gemma_brain.py listens and
+# talks through Pupper's mic and speaker.
 #
 # Motors stay idle until someone asks Pupper to move. Keep it on the floor, hand near the
 # e-stop (the right stick on the gamepad relaxes the motors).
@@ -33,7 +34,7 @@ LOG=/tmp/gemini-pupper/server.log
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export PATH=$HOME/.local/node/bin:$PATH   # robot/setup.sh installs Node there
 export PUPPER_MEMORY_FILE=${PUPPER_MEMORY_FILE:-$HOME/.config/gemini-pupper/memory.json}
-BRAIN=gemini; [ -n "${PUPPER_OLLAMA:-}" ] && BRAIN=gemma KIOSK=0  # gemma: the Mac started us
+BRAIN=gemini; [ -n "${PUPPER_OLLAMA:-}" ] && BRAIN=gemma  # gemma: the Mac started us
 
 stop_all() {
   echo; echo "stopping..."
@@ -86,9 +87,9 @@ wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk "BEGIN{print $VOLUME/100}")" 2>/dev
 # --- 4. memory: who Pupper is talking with (python3 lab/hackathon_memory.py show / reset)
 echo "memory: $(python3 lab/hackathon_memory.py summary 2>/dev/null || echo 'unavailable')"
 
-# --- 5. start (the local brain: no kiosk, whose app would connect Gemini; the eyes ask the Mac's Gemma)
+# --- 5. start (the local brain: the kiosk is its face, without Gemini; the eyes ask the Mac's Gemma)
 if [ $BRAIN = gemma ]; then
-  PUPPER_EYES_GEMMA=ollama "$HERE/robot/start.sh" || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
+  PUPPER_EYES_GEMMA=ollama "$HERE/robot/start.sh" $([ $KIOSK = 1 ] && echo --face) || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
 elif [ $KIOSK = 1 ]; then
   "$HERE/robot/start.sh" --kiosk || { echo "start failed; see /tmp/gemini-pupper/*.log"; "$HERE/robot/stop.sh"; exit 1; }
 else

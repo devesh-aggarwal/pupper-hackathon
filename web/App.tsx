@@ -8,6 +8,7 @@ import { GeminiLiveService } from './services/geminiLive';
 import RobotBridge from './services/robotBridge';
 import { RobotEvents } from './services/robotEvents';
 import { DEMO, runDemo } from './services/demo';
+import { LOCAL_BRAIN, LocalBrainService } from './services/localBrain';
 
 // Icons
 const CogIcon = () => (
@@ -135,6 +136,7 @@ const App: React.FC = () => {
   }, [view]);
 
   const geminiRef = useRef<GeminiLiveService | null>(null);
+  const localRef = useRef<LocalBrainService | null>(null);  // ?brain=local: Gemma on the robot's side
   // Persistent bridge instance for polling
   const bridgeRef = useRef<RobotBridge>(new RobotBridge(config.robotApiUrl));
 
@@ -189,7 +191,7 @@ const App: React.FC = () => {
       if (busy) return;
       busy = true;
       try {
-        const gemini = geminiRef.current;
+        const gemini = geminiRef.current ?? localRef.current;
         const connected = !!gemini?.isConnected;
         const res = await bridgeRef.current.claimReminders(connected ? 0 : 60);
         const dismissed = res?.dismissed ?? [];
@@ -203,7 +205,7 @@ const App: React.FC = () => {
         for (const r of res?.due ?? []) {
           let how = 'screen only';
           if (gemini && await gemini.announce(r.announce)) {
-            how = 'gemini';
+            how = LOCAL_BRAIN ? 'gemma' : 'gemini';
           } else if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
             window.speechSynthesis.speak(new SpeechSynthesisUtterance(r.speech));
             how = 'browser speech';
@@ -223,6 +225,17 @@ const App: React.FC = () => {
     const interval = setInterval(tick, 5000);
     return () => { clearInterval(interval); reminderTickRef.current = null; };
   }, [addLog]);
+
+  // The local brain (?brain=local): no Gemini and no key. The face shows the brain on the robot,
+  // and the browser's senses (sound monitor, object detector) run as in a Gemini session.
+  useEffect(() => {
+    if (!LOCAL_BRAIN) return;
+    const service = new LocalBrainService(bridgeRef.current, { ...config, cameraSource: 'server' }, addLog,
+      setAudioLevel, setCaption, on => setConnState(on ? ConnectionState.CONNECTED : ConnectionState.DISCONNECTED));
+    localRef.current = service;
+    service.start();
+    return () => { service.stop(); localRef.current = null; };
+  }, [config, addLog]);
 
   // Demo mode (?demo): a scripted scene, no robot and no Gemini (services/demo.ts)
   useEffect(() => {
@@ -357,7 +370,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {connState === ConnectionState.DISCONNECTED && !DEMO && (
+        {connState === ConnectionState.DISCONNECTED && !DEMO && !LOCAL_BRAIN && (
            <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-10 pointer-events-auto">
               <button 
                 onClick={handleConnect}
@@ -398,7 +411,7 @@ const App: React.FC = () => {
         </div>
 
         <div className="flex items-center space-x-2 w-32 justify-end">
-          {connState === ConnectionState.CONNECTED ? (
+          {connState === ConnectionState.CONNECTED && !LOCAL_BRAIN ? (
              <button 
                onClick={handleDisconnect}
                title="Sleep / Disconnect"
@@ -406,6 +419,8 @@ const App: React.FC = () => {
              >
                <PowerIcon />
              </button>
+          ) : connState === ConnectionState.CONNECTED ? (
+            <span className="text-xs font-medium text-cyan-400 mr-2" title="The local brain (Gemma) is listening">GEMMA</span>
           ) : (
             <div className="text-gray-500 flex items-center gap-1 mr-2" title="Sleeping">
               <MoonIcon />

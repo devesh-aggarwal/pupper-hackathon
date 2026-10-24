@@ -347,14 +347,15 @@ def _post(backend, path: str, payload: dict | None = None) -> dict:
 
 def news(backend) -> list[str]:
     """What the robot has to tell Gemma since the last look: events (GET /events), and, on the real
-    robot, reminders that came due (the web app claims and delivers them; with no web app, we do)."""
+    robot, reminders that came due. The face (the web app) claims those first, shows the card and
+    hands them over as an event (POST /brain/announce); with no face, we claim them a minute late."""
     out = []
     for ev in backend.events():
         print(f"  [event {ev['kind']}] {ev['text']}" + (f"  (screen: {ev['display']['text']})" if ev.get("display") else ""))
         if ev.get("for_gemini"):
             out.append(ev["for_gemini"])
     if isinstance(backend, RobotBackend):
-        for r in _post(backend, "/reminders/claim?min_late_s=0").get("due", []):
+        for r in _post(backend, "/reminders/claim?min_late_s=60").get("due", []):
             print(f"  [reminder #{r['id']}] {r['message']}")
             out.append(r["announce"])
             _post(backend, f"/reminders/{r['id']}/delivered", {"how": "gemma"})
@@ -366,6 +367,15 @@ def transcript(backend, who: str, text: str) -> None:
     if isinstance(backend, RobotBackend) and text:
         try:
             _post(backend, "/transcript", {"who": who, "text": text})
+        except (urllib.error.URLError, OSError):
+            pass
+
+
+def brain_state(backend, listening: bool, speaking: bool, caption: str | None) -> None:
+    """What the face shows for us: listening, speaking, the caption (POST /brain/state)."""
+    if isinstance(backend, RobotBackend):
+        try:
+            _post(backend, "/brain/state", {"listening": listening, "speaking": speaking, "caption": caption})
         except (urllib.error.URLError, OSError):
             pass
 
@@ -517,6 +527,8 @@ class Speaker:
         self.q: queue.Queue = queue.Queue()
         self.speaking = threading.Event()
         self.quiet_until = 0.0
+        self.saying: str | None = None  # the sentence being said now (the face's caption)
+        self.on_change = lambda: None   # called when Pupper starts or stops saying something
         threading.Thread(target=self._run, daemon=True).start()
 
     def say(self, text: str) -> None:
@@ -529,6 +541,8 @@ class Speaker:
         while True:
             text = self.q.get()
             self.speaking.set()
+            self.saying = text
+            self.on_change()
             try:
                 self._speak(text)
             except (OSError, subprocess.CalledProcessError) as e:
@@ -537,6 +551,8 @@ class Speaker:
                 if self.q.empty():
                     self.quiet_until = time.time() + 0.4  # the room's echo of the last word
                     self.speaking.clear()
+                    self.saying = None
+                    self.on_change()
 
     def _speak(self, text: str) -> None:
         aplay = ["aplay", "-q"] + (["-D", self.device] if self.device else [])
@@ -583,8 +599,14 @@ async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Spe
                 asyncio.run_coroutine_threadsafe(backend.call("stop", {}), loop)
             loop.call_soon_threadsafe(inbox.put_nowait, ("person", text))
 
+    def publish() -> None:  # to the face: on each change, and every second (so it knows we're alive)
+        brain_state(backend, not speaker.busy(), speaker.speaking.is_set(), speaker.saying)
+
+    speaker.on_change = publish
+
     async def poll_news() -> None:
         while True:
+            await asyncio.to_thread(publish)
             try:
                 for text in await asyncio.to_thread(news, backend):
                     inbox.put_nowait(("robot", text))
