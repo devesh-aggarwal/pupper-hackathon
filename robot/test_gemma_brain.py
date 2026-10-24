@@ -17,6 +17,7 @@ import json
 import math
 import os
 import subprocess
+import urllib.request as urllib_request
 import sys
 import tempfile
 import threading
@@ -533,6 +534,33 @@ def voice_tests() -> None:
         check(f"{text!r} goes to Gemma, not straight to stop", not gb.STOP_WORDS.match(text))
 
 
+def relay_tests() -> None:
+    print("Brain: the gzip relay (tools/ollama_relay.py) in front of Ollama, for the Pupper's slow WiFi")
+    ollama = FakeOllama([{"content": "Hello."}])
+    port = 18000 + os.getpid() % 1000
+    relay = subprocess.Popen([sys.executable, str(HERE.parent / "tools" / "ollama_relay.py"), "--port", str(port),
+                              "--ollama", ollama.url], stdout=subprocess.DEVNULL)
+    try:
+        import time as _t
+        for _ in range(50):
+            try:
+                urllib_request.urlopen(f"http://127.0.0.1:{port}/relay", timeout=1).close()
+                break
+            except OSError:
+                _t.sleep(0.1)
+        llm = gb.Ollama(f"http://127.0.0.1:{port}", gb.MODEL)
+        m = llm.chat([{"role": "user", "content": "hi " * 2000}])
+        check("through the relay, the brain sends gzip and Ollama gets the request whole",
+              llm.gzip is True and m.get("content") == "Hello." and ollama.requests[0]["messages"][0]["content"] == "hi " * 2000
+              and llm.sent < 1000, (llm.gzip, llm.sent, m))
+        direct = gb.Ollama(ollama.url, gb.MODEL)
+        direct.chat([{"role": "user", "content": "hi"}])
+        check("straight to Ollama (no relay), it sends plain JSON", direct.gzip is False)
+    finally:
+        relay.kill()
+        ollama.close()
+
+
 def cli_tests() -> None:
     print("Brain: the command line, end to end (python3 robot/gemma_brain.py, typing, on the fake robot)")
     script = HERE / "gemma_brain.py"
@@ -572,7 +600,7 @@ def cli_tests() -> None:
     check("no Ollama: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
 
 
-GROUPS = {"translation": translation_tests, "loop": loop_tests, "voice": voice_tests, "cli": cli_tests}
+GROUPS = {"translation": translation_tests, "loop": loop_tests, "voice": voice_tests, "relay": relay_tests, "cli": cli_tests}
 
 
 def main(groups: list[str]) -> None:
