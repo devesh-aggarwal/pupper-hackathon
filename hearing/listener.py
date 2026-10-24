@@ -135,8 +135,9 @@ class Hearing:
         if yam is None:
             log.warning("YAMNet not installed (python3 hearing/classify.py --install): sirens and alarms use the meter")
         meter, recent = M.Meter(), []
-        live = D.LiveDetector(self.params, classes=("bang", "shout", "knock") if yam else D.CLASSES)
-        knocks = classify.KnockGate(yam) if yam else None   # knocks wait for YAMNet's "not speech"
+        live = D.LiveDetector(self.params, classes=("bang", "shout", "knock") if yam else D.CLASSES,
+                              soft_knocks=yam is not None)
+        knocks = classify.KnockGate(yam) if yam else None   # meter knocks wait for YAMNet to confirm (KnockGate)
         blocks, next_check = 0, time.monotonic() + 2.0
         while True:
             block = await q.get()

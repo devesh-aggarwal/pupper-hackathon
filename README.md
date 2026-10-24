@@ -293,11 +293,21 @@ The Pupper must be logged into W&B (`wandb login`) with the account the runs are
 
 ```sh
 ssh pi@pupper5.local
+ssh pi@100.88.25.110          # from anywhere, over Tailscale (both on the tailnet)
 ```
 
 The laptop and the Pupper must be on the same network for `.local` (mDNS) to resolve. To skip the
 password from then on, set up key-based login once: `ssh-copy-id pi@pupper5.local` (or
 `./tools/pup setup`).
+
+## `tools/mic_monitor.py`: which mic is Pupper listening with?
+
+A small page, run on the Pupper (`python3 tools/mic_monitor.py`, port 8090; open
+`http://<pupper>:8090`, or `ssh -N -L 8090:localhost:8090 ...` then `http://localhost:8090`). It
+shows PipeWire's default input (what `arecord -D default`, so `robot/gemma_brain.py`, records
+from), every program recording right now (the brain shows up as `arecord`, the kiosk as
+Chromium), and a live level bar. It only reads the mic's loudness: nothing moves, no audio leaves
+the Pupper. Standard library only.
 
 ## `./tools/pup`: quick testing on the Pupper
 
@@ -364,9 +374,10 @@ green, blue, purple, white, black); reminders are a white card too, and a tap cl
 sound alerts take over the whole screen. The face blinks and changes emotion by itself (sleepy when
 not connected, listening, happy while talking, excited when a search finds something, surprised at
 a sound alert, sad on a fault). **Demo without a robot:** `cd web && npm run dev`, then open
-`https://localhost:5173/?demo` for a scripted loop of all of these (`web/services/demo.ts`; nothing
-moves, no Gemini). With **Captions** on (Settings, default on) everything Pupper says is also
-written on its face (Gemini Live's output transcription). With **Sound alerts** on
+`https://localhost:5173/?demo` (`web/services/demo.ts`): the face, awake, with no robot and no
+Gemini (nothing moves); it asks for the mic, and real sounds in the room perk the ears up. With
+**Captions** on (Settings, default on) everything Pupper says is also written on its face (Gemini
+Live's output transcription). With **Sound alerts** on
 (default on), the browser measures the mic (dB above a slowly adapting background; Pupper's own
 voice is ignored) and posts loud moments to `POST /alerts/sound`; the robot decides: alerts off
 (`sound_alerts(enabled=false)`, "stop listening"), under the sensitivity (`low`/`medium`/`high`
@@ -475,7 +486,7 @@ Running it, from a laptop (one tunnel both ways: the frames come down, `/look` g
 
 ```bash
 python3 -m pip install -r vision/requirements.txt          # numpy, pillow, onnxruntime
-ollama pull gemma3:4b                                        # once; a vision model, on-device
+ollama pull gemma4:26b                                       # once; a vision model, on-device
 ssh -N -L 8000:localhost:8000 -R 8100:localhost:8100 pi@pupper5.local
 python3 vision/eyes.py --fetch-depth-model                   # first time: downloads the ~99 MB model
 python3 vision/eyes.py                                       # then: depth at 5 Hz, Gemma on demand
@@ -488,8 +499,9 @@ Ollama installed there or `--no-gemma`. Without the eyes service nothing changes
 stays out of the way, `go_to` falls back to the COCO detector, and `look` says it has no eyes.
 
 Speeds: depth takes about 60 ms a frame at 252 px on a laptop (Apple Silicon CPU), so 5 Hz is easy,
-and 320-350 ms on the Pi 5. `gemma3:4b` through Ollama takes 1.6 s for a yes/no question and 2.2 s
-for a box or a description.
+and 320-350 ms on the Pi 5. `gemma4:26b` through Ollama on an M4 Pro answers a yes/no question or
+gives a box in about 0.2 s (thinking off; with it on, its few tokens go to thinking and every answer
+comes back empty).
 
 To check the threshold on a new robot or room, grab a frame with
 `curl localhost:8000/camera/image -o frame.jpg` and run `python3 vision/eyes.py --image frame.jpg`:
@@ -607,8 +619,9 @@ provided registry besides the list of modules.
 sounddevice, all on the Pupper), sound alerts come from `hearing/listener.py` instead of the
 browser's measurement. It listens through PipeWire, next to the kiosk:
 
-- **Bangs and shouts:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
-  thresholds in dB above the room's noise floor.
+- **Bangs:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
+  thresholds in dB above the room's noise floor. It also detects shouts, but shouting is
+  not an alert (it is not in `URGENT` in `lab/hackathon_alerts.py`), so it shows nothing.
 - **Sirens, alarms, doorbells, crashes, knocking and a baby crying:** Google's YAMNet
   (`hearing/classify.py`, AudioSet's 521 classes through LiteRT, on-device, about 1.5 ms per
   0.5 s).
@@ -691,21 +704,25 @@ The brain's heavy half (Gemma, whisper) runs on a Mac, the rest on the Pupper. O
   whisper.cpp (Metal)      :8178                       robot/server.py, gemma_brain.py, face, mic, speaker
 ```
 
-The Pupper can't reach the Mac by itself (other WiFi, ngrok), so the Mac links its servers to it:
+The Pupper can't reach the Mac's servers by itself, so the Mac links them to it over ssh (Tailscale):
 an ssh connection, kept up in the background, that makes the two ports `localhost` on the Pupper.
 
 **On the Mac**, `./run_pupper.sh` (`tools/brain_on_mac.sh`):
 
 1. Finds the Pupper over ssh with the address saved in `~/.config/pupper/ssh` (`pi@host port`).
-   When that stops working (a new ngrok address), it asks once for the ssh command you use and
-   saves it. It prints the branch, revision and local changes in `~/pupper-hackathon` on the
-   Pupper. Startup does not pull or switch code: update that checkout explicitly before running.
+   By default that's Tailscale, `pi@100.88.25.110`. When it stops working, it asks once for the ssh
+   command you use and saves it. It prints the branch, revision and local changes in
+   `~/pupper-hackathon` on the Pupper. Startup does not pull or switch code: update that checkout
+   explicitly before running.
 2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11435
    (16k context, Gemma kept loaded; an Ollama app you already run is left alone, they share the
    models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `large-v3-turbo` model,
    the first time). Both listen on the Mac only.
 3. Starts the link and checks the Pupper sees both servers through it.
-4. Runs `./run_pupper.sh` on the Pupper (below).
+4. Starts the eyes on the Mac (`vision/eyes.py`, in `~/.cache/pupper/venv`): depth, the detector
+   and Gemma on the Pupper's camera at 5 frames a second, the rate the obstacle rule is designed
+   for. The Pupper's own eyes manage about 1 a second and stand down while these post.
+5. Runs `./run_pupper.sh` on the Pupper (below).
 
 Ctrl+C stops the robot. The servers and the link keep running (until the Mac sleeps or restarts),
 so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_mac.sh stop` ends them.
@@ -714,7 +731,9 @@ so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_m
 (`~/.cache/pupper/silero_vad.onnx`, from `robot/setup_voice.sh`): by loudness alone, a noisy room
 never sounded quiet and whisper got 15 s of noise at a time. Each utterance is at most 8 s.
 whisper is `large-v3-turbo` (about 0.5 s a sentence on an M4 Pro), told Pupper's own words
-("stand up", "push-up") as a hint. Piper's voice is loaded once, not for every sentence.
+("stand up", "push-up") as a hint, in English, with non-speech sounds suppressed. What whisper
+says for noise rather than speech ("Thank you.", "Thanks for watching", "Ah.") is dropped when it is
+the whole utterance. Piper's voice is loaded once, not for every sentence.
 
 **Watching it on the Mac.** Everything heavy runs on the Mac's GPU, in short bursts (Gemma 4 26B
 uses 4B parameters per token), so the Mac may not get warm. While the link is up:
@@ -740,28 +759,23 @@ the on-device object detector on the camera, and reminders. A due reminder's car
 face, and the app hands it to the brain to say (`POST /brain/announce`, an event the brain reads
 like any other). Without a face, the brain claims due reminders itself, a minute late.
 
+**Text on the screen only for a deaf person.** Pupper speaks. Captions, `show_text`, reminder and
+alert cards and the "what Pupper hears" label appear only when the person it is talking with is
+deaf or hard of hearing: a fact it remembers about them ("I'm deaf" -> `remember`;
+`needs_text()` in `lab/hackathon_memory.py`, reported in `GET /brain/state`). Otherwise
+`show_text` declines and Gemma says it instead.
+
 Ctrl+C stops the brain and the robot (`robot/stop.sh`); so does the ssh connection dropping. Run
 it with Pupper on the floor and a hand near the e-stop: it moves when you ask it to.
 
 Once per laptop: `./tools/pup setup` (the ssh key) and Ollama (`brew install ollama` or the app).
 
 **The model: `gemma4:26b`.** A mixture of experts with 4B parameters active per token, so it is
-fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. Until it is pulled
-(`ollama pull gemma4:26b`, about 17 GB, once, on a fast network), the script uses the best Gemma
-the Mac already has and says so. Set `PUPPER_GEMMA` to an installed Ollama model name to use it
-for both the brain and eyes; the Mac passes that selection to the Pi.
-`tools/brain_bench.py` scores a model on commands and conversations through the
-real prompt and tools, on the fake robot. Historical measurements on the M4 Pro (before the
-benchmark required action calls to be accepted; rerun before relying on these scores):
-
-| model | right | clean | junk | reply |
-| --- | --- | --- | --- | --- |
-| `gemma4:26b` | 17/17 | 17/17 | 0 | 0.5 s |
-| `gemma3:4b` | 14/17 | 14/17 | 0 | 0.7 s |
-
-"Clean" is right with nothing extra that moves the robot. `gemma3:4b` has no tool calling (it
-answers in JSON), skips `remember`, turns "give me your paw" into a sidestep and doesn't walk the
-square. With `gemma4:26b`, the brain:
+fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. It is the only model: the
+script pulls it the first time (about 17 GB, on a fast network). `tools/brain_bench.py` scores it
+on commands and conversations through the real prompt and tools, on the fake robot: on the M4 Pro,
+17/17 right, 17/17 clean (nothing extra that moves the robot), 0.5 s to reply (measured before the
+benchmark required action calls to be accepted; rerun before relying on it). The brain:
 
 - **keeps thinking off.** On, it made the same choices but took 3.4 s to reply. Off, its thought
   sometimes leaks into a reply after a tool result ("thought ... I found your cup", before any
@@ -789,8 +803,7 @@ Saying just "stop" (or "Pupper, stop") stops the robot at once, without waiting 
 gamepad's e-stop works whatever the brain does. Robot events (reminders, sound alerts, search
 results) become turns, so Pupper speaks up by itself, and what was said goes to the session log
 (`POST /transcript`). How Gemma calls tools: natively (Ollama's tools); if it writes a call out as
-text instead, that still runs; and with a model or an Ollama that can't do tools at all,
-`--tools auto` switches to JSON replies (`{say, calls}`, held to a schema). Arguments like `"1.5"`
+text instead, that still runs. Arguments like `"1.5"`
 for a number are fixed by the declaration; anything else wrong is refused by the robot, with the
 reason, as with Gemini.
 
@@ -862,6 +875,29 @@ Google Gemma Hardware Hackathon:
   ([The local brain on a Mac](#the-local-brain-on-a-mac)). The features above are
   already brain-agnostic: tools, events and endpoints on the robot; the object detector and the
   sound monitor already run on-device.
+
+  ```
+  {
+  "tagOwners": {
+    "tag:pupper": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["deveshaggarwal100@gmail.com"],
+      "dst": ["tag:pupper"],
+      "ip": ["tcp:22"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["deveshaggarwal100@gmail.com"],
+      "dst": ["tag:pupper"],
+      "users": ["pi"]
+    }
+  ]
+}
+```
 
 ## Safety
 

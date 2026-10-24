@@ -53,7 +53,7 @@ case "${PUPPER_EYES_GEMMA:-ollama}" in
   api) [ -s "$KEY_FILE" ] && GEMMA="--gemma-api --gemma-api-key-file $KEY_FILE" ;;
   # every 2 minutes, not 15 s: each description holds the Mac's Gemma for ~3.5 s, and a spoken
   # request waits behind it
-  ollama) GEMMA="--ollama ${PUPPER_OLLAMA:-http://localhost:11435} --gemma ${PUPPER_GEMMA:-gemma4:26b} --describe-every 120" ;;
+  ollama) GEMMA="--ollama ${PUPPER_OLLAMA:-http://localhost:11435} --gemma gemma4:26b --describe-every 120" ;;
 esac
 if [ "${PUPPER_EYES:-on}" = "on" ] && python3 -c "import onnxruntime, numpy, PIL" 2>/dev/null; then
   setsid nohup nice -n 10 python3 -u $REPO/vision/eyes.py $GEMMA --hz 1 --depth-size 224 --fetch-depth-model --fetch-detector-model \

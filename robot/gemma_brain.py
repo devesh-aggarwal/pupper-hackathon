@@ -17,8 +17,7 @@ Where things run (./run_pupper.sh on the Mac sets it all up: tools/brain_on_mac.
 The robot server stays on the Pi's localhost, so nothing on the network can move the robot. Run on
 the Mac itself, without --robot, it talks to the Mac's own Ollama: a quick try on the fake robot.
 
-Gemma calls tools natively (Ollama's tools), or, with a model or an Ollama that can't, by naming
-them in a JSON reply (--tools json); auto tries native first and falls back. Robot events (a
+The brain is Gemma 4 26B (gemma4:26b) in Ollama, calling tools natively (Ollama's tools). Robot events (a
 reminder came due, a loud sound, a search finished) become turns of their own, so Pupper speaks
 up without being asked, as it does with Gemini. Saying just "stop" stops the robot at once,
 without waiting for Gemma.
@@ -57,10 +56,7 @@ from gemini_chat import DeskBackend, RobotBackend  # noqa: E402  the same two ro
 OLLAMA_URL = os.environ.get("PUPPER_OLLAMA", "http://localhost:11434")
 WHISPER_URL = os.environ.get("PUPPER_WHISPER", "http://localhost:8178")
 PIPER_VOICE = Path(os.environ.get("PUPPER_PIPER_VOICE", Path.home() / ".local/share/piper/en_US-lessac-medium.onnx"))
-# Without --model, the first of these that Ollama has: the biggest Gemma first. The 26B is a
-# mixture of experts, 4B active per token: fast for its size, and much the best at picking tools.
-PREFERRED = ("gemma4:26b-a4b", "gemma4:26b", "gemma4:12b", "gemma4:e4b", "gemma4", "gemma4:e2b",
-             "gemma3:12b", "gemma3:4b")
+MODEL = "gemma4:26b"  # a mixture of experts, 4B parameters active per token: fast, and good at picking tools
 NUM_CTX = 16384  # the prompt and 30 tools are about 8k tokens: Ollama's default context would cut them off
 MAX_ROUNDS = 6   # tool calls in a row before Gemma has to answer
 MAX_CALLS = 24   # enough for a taught routine or a square; one bad reply cannot flood the queue
@@ -175,29 +171,6 @@ def structured_reply(data) -> tuple[str, list[tuple[str, dict]]]:
     return data["say"], [(c["name"], c.get("args", {})) for c in data["calls"]]
 
 
-def reply_schema(names: list[str]) -> dict:
-    """--tools json: every reply is {say, calls}, enforced by Ollama's structured output."""
-    return {"type": "object", "required": ["say", "calls"], "properties": {
-        "say": {"type": "string"},
-        "calls": {"type": "array", "items": {"type": "object", "required": ["name", "args"], "properties": {
-            "name": {"type": "string", "enum": names}, "args": {"type": "object"}}}}}}
-
-
-def json_mode_prompt(decls: list[dict]) -> str:
-    lines = ['Reply with JSON only, always in this form: {"say": "what you say out loud, or empty", '
-             '"calls": [{"name": "a tool", "args": {...}}]}. calls is [] when you only talk. After calls you '
-             "get their results, and reply again in the same form. The tools:"]
-    for d in decls:
-        params = (d.get("parameters") or {})
-        required = set(params.get("required") or [])
-        lines.append(f"- {d['name']}: {d.get('description', '')}")
-        for k, p in (params.get("properties") or {}).items():
-            enum = f" One of: {', '.join(map(str, p['enum']))}." if p.get("enum") else ""
-            lines.append(f"    {k} ({str(p.get('type', '')).lower()}{', required' if k in required else ''}): "
-                         f"{p.get('description', '')}{enum}")
-    return "\n".join(lines)
-
-
 def drop_thought(text: str) -> str:
     """Gemma 4's thought channel, should any leak into a reply: "thought ... <channel|>answer" keeps
     the answer; a thought that never closes is all thought, and none of it is for the person."""
@@ -228,10 +201,6 @@ class ModelReplyError(OllamaError):
 class Ollama:
     def __init__(self, url: str, model: str, num_ctx: int = NUM_CTX, timeout: float = 180.0):
         self.url, self.model, self.num_ctx, self.timeout = url.rstrip("/"), model, num_ctx, timeout
-        # Thinking off: on, Gemma 4 takes 3.4 s to reply instead of 0.5 s, for the same tool choices
-        # (tools/brain_bench.py). Off, its thought sometimes leaks into a reply after a tool result;
-        # drop_thought() keeps that from being said. None: a model that can't be told (Ollama says so).
-        self.think: bool | None = False
         self.last: dict = {}  # the last reply, for its timings
 
     def _req(self, path: str, body: dict | None = None, timeout: float | None = None) -> dict:
@@ -247,43 +216,27 @@ class Ollama:
     def models(self) -> list[str]:
         return [m.get("name", "") for m in self._req("/api/tags", timeout=5).get("models", [])]
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, fmt: dict | None = None) -> dict:
+    def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         # keep_alive -1: stay loaded (a reload is 10-30 s); num_ctx must match what the eyes'
         # requests get (OLLAMA_CONTEXT_LENGTH, tools/brain_on_mac.sh), or Ollama reloads between them.
-        body = {"model": self.model, "messages": messages, "stream": False, "keep_alive": -1,
+        # Thinking off: on, Gemma 4 takes 3.4 s to reply instead of 0.5 s, for the same tool choices
+        # (tools/brain_bench.py). Off, its thought sometimes leaks into a reply after a tool result;
+        # drop_thought() keeps that from being said.
+        body = {"model": self.model, "messages": messages, "stream": False, "keep_alive": -1, "think": False,
                 "options": {"num_ctx": self.num_ctx, "num_predict": 2048, "temperature": 0.3}}
-        if self.think is not None:
-            body["think"] = self.think
         if tools:
             body["tools"] = tools
-        if fmt:
-            body["format"] = fmt
-        try:
-            self.last = self._req("/api/chat", body)
-        except OllamaError as e:
-            if "think" in str(e).lower() and self.think is not None:  # this model can't be told: don't
-                self.think = None
-                return self.chat(messages, tools, fmt)
-            raise
+        self.last = self._req("/api/chat", body)
         return self.last.get("message") or {}
-
-
-def pick_model(names: list[str]) -> str | None:
-    for want in PREFERRED:
-        for n in names:
-            if n == want or n == want + ":latest" or n.startswith(want + "-"):
-                return n
-    return next((n for n in names if n.startswith("gemma")), None)
 
 
 # ============================================================ the loop
 class Brain:
     """One conversation with Gemma: a turn goes in, Gemma talks and calls tools until it is done."""
 
-    def __init__(self, llm: Ollama, prompt: str, decls: list[dict], backend, say, mode: str = "auto",
-                 keep: int = KEEP, log=print):
+    def __init__(self, llm: Ollama, prompt: str, decls: list[dict], backend, say, keep: int = KEEP, log=print):
         self.llm, self.backend, self.say, self.log, self.keep = llm, backend, say, log, keep
-        self.prompt, self.mode = prompt, mode  # auto: native, until Ollama says this model can't
+        self.prompt = prompt
         self.decls = {d["name"]: d for d in decls}
         self.tools = ollama_tools(decls)
         self.history: list[dict] = []
@@ -302,10 +255,7 @@ class Brain:
             return {"success": False, "message": "stop could not be confirmed; use the physical e-stop"}
 
     def system(self) -> dict:
-        text = VOICE_RULES + "\n\n" + self.prompt
-        if self.mode == "json":
-            text += "\n\n" + json_mode_prompt(list(self.decls.values()))
-        return {"role": "system", "content": text}
+        return {"role": "system", "content": VOICE_RULES + "\n\n" + self.prompt}
 
     async def turn(self, text: str, image: bytes | None = None, source: str = "person") -> None:
         if source == "person" and STOP_WORDS.match(text):
@@ -445,8 +395,8 @@ class Brain:
         """Gemma reads the whole prompt and tools once, before anyone speaks, and the exchange stays as
         the start of the conversation: Ollama reuses a cached prompt reliably only when the next
         request extends it (Gemma 4's sliding-window attention), so the first real turn then takes
-        about a second, not ten. A call in the reply is not run (and the exchange isn't kept). Also
-        settles whether this model calls tools natively or needs JSON replies. Returns the seconds."""
+        about a second, not ten. A call in the reply is not run (and the exchange isn't kept).
+        Returns the seconds it took."""
         t0 = time.time()
         self.turn_starts = []
         self.history = [{"role": "user", "content": "[robot] Starting up; nobody has spoken yet. Reply with one word: ready."}]
@@ -462,47 +412,28 @@ class Brain:
     def _ask(self) -> tuple[str, list[tuple[str, dict]], bool]:
         """One reply from Gemma: (what to say, the calls, whether they were native tool calls)."""
         self._fit_context()
-        messages = [self.system()] + self.history
-        if self.mode in ("auto", "native"):
-            try:
-                m = self.llm.chat(messages, tools=self.tools)
-            except OllamaError as e:
-                if self.mode == "auto" and "does not support tools" in str(e):
-                    self.log(f"  ({self.llm.model} can't call tools natively here: switching to JSON replies)")
-                    self.mode = "json"
-                    return self._ask()
-                raise
-            content = drop_thought(m.get("content") or "")
-            calls, native = native_calls(m), True
-            if not calls:
-                content, calls = calls_in_text(content, self.decls)
-                native = False
-                if not calls and content.lstrip().startswith(("{", "[", "```")):
-                    raise ModelReplyError("unrecognized tool protocol in model text")
-            reply = {"role": "assistant", "content": drop_thought(m.get("content") or "")}
-            if m.get("tool_calls"):
-                reply["tool_calls"] = m["tool_calls"]
-            self.history.append(reply)
-            return clean_speech(content), calls, native
-        m = self.llm.chat(messages, fmt=reply_schema(sorted(self.decls)))
-        raw = m.get("content") or ""
-        self.history.append({"role": "assistant", "content": raw})
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            raise ModelReplyError("model returned invalid JSON instead of a tool response") from None
-        say, calls = structured_reply(data)
-        return clean_speech(drop_thought(say)), calls, False
+        m = self.llm.chat([self.system()] + self.history, tools=self.tools)
+        content = drop_thought(m.get("content") or "")
+        calls, native = native_calls(m), True
+        if not calls:  # a call written out as text instead of made: it still runs
+            content, calls = calls_in_text(content, self.decls)
+            native = False
+            if not calls and content.lstrip().startswith(("{", "[", "```")):
+                raise ModelReplyError("unrecognized tool protocol in model text")
+        reply = {"role": "assistant", "content": drop_thought(m.get("content") or "")}
+        if m.get("tool_calls"):
+            reply["tool_calls"] = m["tool_calls"]
+        self.history.append(reply)
+        return clean_speech(content), calls, native
 
     def _add_results(self, results: list[tuple[str, dict]], native: bool) -> None:
         if native:
             for name, result in results:
                 self.history.append({"role": "tool", "tool_name": name, "content": json.dumps(result)})
             return
-        # Calls Gemma wrote out (or JSON mode): the results go back as a message it can read.
+        # Calls Gemma wrote out: the results go back as a message it can read.
         self.history.append({"role": "user", "content": "[tool results, from the robot] " + "; ".join(
-            f"{name} -> {json.dumps(result)}" for name, result in results)
-            + (" Reply in the same JSON form." if self.mode == "json" else " Now tell the person what happened.")})
+            f"{name} -> {json.dumps(result)}" for name, result in results) + " Now tell the person what happened."})
 
     def _trim(self) -> None:
         # Half at a time: every trim changes the start of the conversation, and Gemma re-reads the
@@ -523,7 +454,7 @@ class Brain:
         while True:
             # JPEG base64 is not text tokens. The reply reserve also leaves room for an image.
             history = [{k: v for k, v in m.items() if k != "images"} for m in self.history]
-            payload = [self.system(), history] + ([self.tools] if self.mode != "json" else [])
+            payload = [self.system(), history, self.tools]
             size = len(json.dumps(payload, ensure_ascii=False).encode())
             if size <= budget:
                 return
@@ -650,8 +581,8 @@ class SileroEndpointer:
     (by loudness alone, a busy room made 15 s "utterances" of noise that whisper turned to nonsense).
     Used like Endpointer: feed() 32 ms frames; an utterance comes out when it has ended."""
 
-    def __init__(self, model: Path = VAD_MODEL, rate: int = 16000, start_s: float = 0.1, end_s: float = 0.7,
-                 min_s: float = 0.3, max_s: float = 8.0, pre_s: float = 0.3, on: float = 0.5, off: float = 0.35):
+    def __init__(self, model: Path = VAD_MODEL, rate: int = 16000, start_s: float = 0.25, end_s: float = 0.7,
+                 min_s: float = 0.5, max_s: float = 8.0, pre_s: float = 0.4, on: float = 0.6, off: float = 0.35):
         import numpy as np
         import onnxruntime as ort
 
@@ -756,9 +687,17 @@ def multipart(fields: dict[str, str], file_field: str, filename: str, data: byte
     return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
 
 
+# What whisper says for noise, chatter and silence, not for speech: alone, they are dropped (a
+# noisy room made "Thank you." turns, and Pupper answered each "You're welcome").
+HALLUCINATIONS = {"thank you", "thank you very much", "thanks", "thanks for watching", "thank you for watching",
+                  "you", "bye", "bye bye", "ah", "oh", "uh", "um", "hmm", "mm", "huh", "so", "okay", "the end"}
+
+
 def clean_heard(text: str) -> str:
     """whisper's words without its notes ([BLANK_AUDIO], (music)); "" if nothing was said."""
     text = " ".join(re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", " ", text or "").split())
+    if re.sub(r"[^a-z ]", "", text.lower()).strip() in HALLUCINATIONS:
+        return ""
     return text if re.search(r"[A-Za-z]", text) else ""
 
 
@@ -773,7 +712,7 @@ class Whisper:
               "shake your paw, follow me, stop, remind me, remember, find my cup.")
 
     def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
-        body, ctype = multipart({"response_format": "json", "temperature": "0.0", "prompt": self.PROMPT},
+        body, ctype = multipart({"response_format": "json", "temperature": "0.0", "language": "en", "prompt": self.PROMPT},
                                 "file", "speech.wav", to_wav(pcm, rate), "audio/wav")
         req = urllib.request.Request(self.url + "/inference", data=body, headers={"Content-Type": ctype})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
@@ -923,7 +862,7 @@ async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Spe
 
 
 # ============================================================ checks, and main
-def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = False) -> int:
+def check(ollama_url: str, whisper_url: str, voice: bool = False) -> int:
     """Is the Mac reachable from here, and can its Gemma call a
     tool? With voice, whisper must answer too. Exits non-zero, saying what to fix, if not."""
     print(f"Ollama at {ollama_url} ... ", end="", flush=True)
@@ -934,27 +873,23 @@ def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = Fa
               " reaches the Pupper through the ssh connection.")
         return 1
     print("ok: " + (", ".join(names) or "no models"))
-    if model and model not in names and model + ":latest" not in names:
-        print(f"  {model} isn't pulled there: ollama pull {model}")
+    if MODEL not in names:
+        print(f"  {MODEL} isn't pulled there. On the Mac: ollama pull {MODEL}")
         return 1
-    chosen = model or pick_model(names)
-    if not chosen:
-        print("  No Gemma pulled. On the Mac: ollama pull gemma4:26b")
-        return 1
-    llm = Ollama(ollama_url, chosen)
+    llm = Ollama(ollama_url, MODEL)
     t0 = time.time()
     try:
         m = llm.chat([{"role": "user", "content": "Say hello in five words."}])
-        print(f"  {chosen} talks ({time.time() - t0:.1f} s, the first call loads it): {m.get('content', '').strip()[:80]!r}")
+        print(f"  {MODEL} talks ({time.time() - t0:.1f} s, the first call loads it): {m.get('content', '').strip()[:80]!r}")
         t0 = time.time()
         tool = [{"name": "stand_up", "description": "Stand up, ready to walk."}]
         m = llm.chat([{"role": "user", "content": "Please stand up."}], tools=ollama_tools(tool))
         calls = native_calls(m) or calls_in_text(m.get("content") or "", {"stand_up"})[1]
         print(f"  tool calls ({time.time() - t0:.1f} s): " + ("native, ok" if native_calls(m) else
-              "written out as text (--tools auto copes)" if calls else
-              f"none ({(m.get('content') or '').strip()[:60]!r}); try --tools json"))
+              "written out as text (it still runs)" if calls else f"none ({(m.get('content') or '').strip()[:60]!r})"))
     except OllamaError as e:
-        print(f"  {chosen}: {e}" + ("  (--tools auto falls back to JSON replies)" if "does not support tools" in str(e) else ""))
+        print(f"  {MODEL}: {e}")
+        return 1
     print(f"whisper at {whisper_url} ... ", end="", flush=True)
     try:
         urllib.request.urlopen(whisper_url, timeout=3).close()
@@ -965,7 +900,7 @@ def check(ollama_url: str, whisper_url: str, model: str | None, voice: bool = Fa
     return 0
 
 
-async def run(args, model: str) -> None:
+async def run(args) -> None:
     backend = RobotBackend(args.robot) if args.robot else DeskBackend()
     prompt, decls = backend.setup()
     if args.only:
@@ -977,10 +912,10 @@ async def run(args, model: str) -> None:
     if args.show:
         print("=== What Gemma reads: the prompt ===\n" + VOICE_RULES + "\n\n" + prompt + "\n")
         print("=== ... and the tools ===\n" + json.dumps(ollama_tools(decls), indent=2) + "\n")
-    print(f"Gemma: {model} at {args.ollama}, with {backend.name}.")
+    print(f"Gemma: {MODEL} at {args.ollama}, with {backend.name}.")
     print(f"Its {len(decls)} tools: " + ", ".join(d["name"] for d in decls))
 
-    llm = Ollama(args.ollama, model, args.num_ctx)
+    llm = Ollama(args.ollama, MODEL, args.num_ctx)
     if args.voice:
         speaker = Speaker(args.tts, args.piper_voice, args.speaker)
         print(f"Voice: {speaker.engine}; ears: whisper at {args.whisper}; mic: {args.mic}")
@@ -992,9 +927,9 @@ async def run(args, model: str) -> None:
             speaker.say(text)
             transcript(backend, "pupper", text)
 
-        brain = Brain(llm, prompt, decls, backend, say, args.tools)
+        brain = Brain(llm, prompt, decls, backend, say)
     else:
-        brain = Brain(llm, prompt, decls, backend, lambda text: print(f"Pupper > {text}"), args.tools)
+        brain = Brain(llm, prompt, decls, backend, lambda text: print(f"Pupper > {text}"))
     print("Gemma is reading the prompt and tools once, so the first turn is quick...", flush=True)
     try:
         print(f"  ready ({await asyncio.to_thread(brain.warm):.1f} s)")
@@ -1013,11 +948,7 @@ def main() -> None:
     ap.add_argument("--voice", action="store_true", help="talk and listen (mic, whisper, Piper) instead of typing")
     ap.add_argument("--check", action="store_true", help="check the Mac's Ollama and whisper from here, and exit")
     ap.add_argument("--ollama", default=OLLAMA_URL, help=f"Ollama on the Mac (default {OLLAMA_URL}; $PUPPER_OLLAMA)")
-    ap.add_argument("--model", default=os.environ.get("PUPPER_GEMMA"),
-                    help="the Gemma in Ollama (default: the biggest one it has; $PUPPER_GEMMA)")
-    ap.add_argument("--tools", choices=["auto", "native", "json"], default="auto",
-                    help="how Gemma calls tools: Ollama's tools, or JSON replies (auto: native, JSON if it can't)")
-    ap.add_argument("--only", help="comma-separated tool names to declare (a small model picks better from fewer)")
+    ap.add_argument("--only", help="comma-separated tool names to declare (the others are left out)")
     ap.add_argument("--num-ctx", type=int, default=NUM_CTX, help=f"Gemma's context in tokens (default {NUM_CTX})")
     ap.add_argument("--camera", action="store_true", help="--voice --robot: send the newest camera frame with each turn")
     ap.add_argument("--whisper", default=WHISPER_URL, help=f"whisper.cpp's server (default {WHISPER_URL}; $PUPPER_WHISPER)")
@@ -1029,18 +960,14 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.check:
-        sys.exit(check(args.ollama, args.whisper, args.model, args.voice))
-    model = args.model
-    if not model:
-        try:
-            model = pick_model(Ollama(args.ollama, "").models())
-        except (OllamaError, urllib.error.URLError, OSError) as e:
-            sys.exit(f"Can't reach Ollama at {args.ollama} ({e}). python3 robot/gemma_brain.py --check helps.")
-        if not model:
-            sys.exit(f"Ollama at {args.ollama} has no Gemma: on the Mac, ollama pull gemma4:26b")
-
+        sys.exit(check(args.ollama, args.whisper, args.voice))
     try:
-        asyncio.run(run(args, model))  # setup inside the loop: the fake robot's job queue lives on it
+        if MODEL not in Ollama(args.ollama, "").models():
+            sys.exit(f"Ollama at {args.ollama} doesn't have {MODEL}: on the Mac, ollama pull {MODEL}")
+    except (OllamaError, urllib.error.URLError, OSError) as e:
+        sys.exit(f"Can't reach Ollama at {args.ollama} ({e}). python3 robot/gemma_brain.py --check helps.")
+    try:
+        asyncio.run(run(args))  # setup inside the loop: the fake robot's job queue lives on it
     except (KeyboardInterrupt, EOFError):
         print()
 

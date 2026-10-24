@@ -16,6 +16,8 @@ export const LOCAL_BRAIN = true;  // the app never connects Gemini (no WAKE PUPP
 export class LocalBrainService {
   /** The brain was heard from in the last 5 s (it posts every second). */
   isConnected = false;
+  /** Text on the screen (captions, cards): only for a deaf or hard-of-hearing person (the robot knows). */
+  onText: (on: boolean) => void = () => {};
   private timers: number[] = [];
   private captionTimer: number | null = null;
   private speaking = false;
@@ -72,6 +74,7 @@ export class LocalBrainService {
       this.log(alive ? 'info' : 'error', alive ? 'Local brain (Gemma) is up' : 'Local brain (Gemma) is not answering');
     }
     this.speaking = alive && !!s.speaking;
+    this.onText(!!s?.text);
     if (alive && s.caption && this.config.captions) {
       if (this.captionTimer) { clearTimeout(this.captionTimer); this.captionTimer = null; }
       this.onCaption(s.caption);

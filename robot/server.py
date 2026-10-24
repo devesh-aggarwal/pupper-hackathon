@@ -481,6 +481,14 @@ def events(after: int = -1):
     return {"events": bus.since(after) if after >= 0 else [], "last": bus.last_id}
 
 
+@app.get("/config/api_key")
+def api_key():
+    """The Gemini key saved on the Pupper (~/.config/gemini-pupper/api_key), so the app on the
+    robot's network needn't type it in. Anyone who can reach port 8000 can read it."""
+    f = Path("~/.config/gemini-pupper/api_key").expanduser()
+    return {"api_key": f.read_text().strip() if f.is_file() else ""}
+
+
 @app.get("/display")
 def display():
     """What is on Pupper's screen right now (show_text, an alert, a reminder), or null."""
@@ -583,7 +591,8 @@ def brain_state_post(req: BrainStateIn):
 @app.get("/brain/state")
 def brain_state_get():
     """What the face shows for the local brain; age_s says how long since it last spoke up (null: never)."""
-    return {**BRAIN, "age_s": round(time.time() - BRAIN["time"], 1) if BRAIN["time"] else None}
+    return {**BRAIN, "age_s": round(time.time() - BRAIN["time"], 1) if BRAIN["time"] else None,
+            "text": behaviors.needs_text()}  # text on the screen: only for a deaf or hard-of-hearing person
 
 
 @app.post("/brain/announce")

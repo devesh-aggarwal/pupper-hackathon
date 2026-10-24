@@ -3,7 +3,7 @@
 prompt and tools (robot/gemma_brain.py), on the fake robot (nothing moves), and is scored on what
 it does.
 
-    python3 tools/brain_bench.py gemma4:26b gemma3:4b
+    python3 tools/brain_bench.py gemma4:26b
 
   right   the call the command needs, with the right arguments (and for a refusal, the limit said)
   clean   right, and nothing else that moves the robot (no extra tricks, no stray walks)
@@ -124,7 +124,7 @@ async def one(url: str, model: str, text: str | list[str], right, allowed: str, 
         return m
 
     llm.chat = timed
-    brain = gb.Brain(llm, prompt, decls, backend, said.append, "auto", log=lambda line: None)
+    brain = gb.Brain(llm, prompt, decls, backend, said.append, log=lambda line: None)
     try:
         for turn in ([text] if isinstance(text, str) else text):
             await brain.turn(turn)
@@ -136,8 +136,7 @@ async def one(url: str, model: str, text: str | list[str], right, allowed: str, 
     # for the extra-action check, but score requested actions only when accepted.
     ok = bool(right(accepted, speech))
     res = {"ok": ok, "clean": ok and len(calls) <= most and all(n in allowed.split() for n, _ in calls),
-           "junk": not speech or any(j in speech for j in JUNK), "reply_s": replies[0] if replies else float("nan"),
-           "mode": brain.mode}
+           "junk": not speech or any(j in speech for j in JUNK), "reply_s": replies[0] if replies else float("nan")}
     if verbose:
         mark = "clean" if res["clean"] else "right" if ok else "WRONG"
         label = text if isinstance(text, str) else " / ".join(text)
@@ -153,7 +152,7 @@ async def bench(url: str, model: str, verbose: bool) -> dict:
     gb.Ollama(url, model)._req("/api/generate", {"model": model, "keep_alive": 0})  # unload: room for the next
     return {"model": model, "right": sum(r["ok"] for r in results), "clean": sum(r["clean"] for r in results),
             "junk": sum(r["junk"] for r in results), "reply_s": statistics.median(r["reply_s"] for r in results[1:]),
-            "first_s": results[0]["reply_s"], "load_s": load_s, "mode": results[-1]["mode"]}
+            "first_s": results[0]["reply_s"], "load_s": load_s}
 
 
 def main() -> None:
@@ -171,10 +170,10 @@ def main() -> None:
             rows.append(loop.run_until_complete(bench(args.ollama, model, not args.quiet)))
         except (gb.OllamaError, OSError) as e:
             print(f"  skipped: {e}")
-    print(f"\n{'model':48} right  clean  junk  reply   first   tools")
+    print(f"\n{'model':48} right  clean  junk  reply   first")
     for r in sorted(rows, key=lambda r: (-r["clean"], -r["right"], r["reply_s"])):
         print(f"{r['model']:48} {r['right']:2}/{len(CASES)}  {r['clean']:2}/{len(CASES)}  {r['junk']:4}  "
-              f"{r['reply_s']:4.1f} s {r['first_s']:5.1f} s   {r['mode']}")
+              f"{r['reply_s']:4.1f} s {r['first_s']:5.1f} s")
 
 
 if __name__ == "__main__":

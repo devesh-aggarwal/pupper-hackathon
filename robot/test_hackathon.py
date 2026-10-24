@@ -147,6 +147,11 @@ async def screen_tests() -> None:
     print("Hackathon B: the screen and events")
     fresh_memory()
     rig = Rig()
+    res = await call(rig, "show_text", text="DOORBELL", detail="14:02", color="red", seconds=5)
+    check("show_text for a hearing person: not shown, say it instead (the screen has text only for the deaf)",
+          not res.ok and "say it out loud" in res.message and alerts.display_state() is None and not memory.needs_text(), res.message)
+    await call(rig, "remember", fact="is deaf")
+    check("... remembering that the person is deaf turns screen text on", memory.needs_text())
     before = alerts.EVENTS.last_id
     res = await call(rig, "show_text", text="DOORBELL", detail="14:02", color="red", seconds=5)
     check("show_text is accepted", res.ok and "DOORBELL" in res.message, res.message)
@@ -215,13 +220,17 @@ async def sound_tests() -> None:
     check("a detected alarm turns the screen red with ALARM, and Gemini is not told",
           res.message.startswith("ALARM") and alerts.display_state()["text"] == "ALARM"
           and alerts.display_state()["color"] == alerts.COLORS["red"] and len(evs) == 1 and evs[0]["for_gemini"] == "", res.message)
-    for cls, words in (("siren", "SIREN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"), ("shout", "SHOUTING"),
+    for cls, words in (("siren", "SIREN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"),
                        ("knock", "KNOCKING"), ("baby", "BABY CRYING")):
         alerts._last_sound_alert = 0.0
         alerts.hearing_detected(rig.ts, {"cls": cls, "score": 50.0, "info": {"label": "x", "confidence": 0.8}})
         check(f"a detected {cls} shows {words} in red", alerts.display_state()["text"] == words
               and alerts.display_state()["color"] == alerts.COLORS["red"], str(alerts.display_state()))
     alerts._last_sound_alert = 0.0
+    alerts.clear_display()
+    res = alerts.hearing_detected(rig.ts, {"cls": "shout", "score": 50.0})
+    check("a shout doesn't alert (shouting is not on the urgent list)",
+          "not an urgent sound" in res.message and alerts.display_state() is None, res.message)
     alerts._last_sound_alert = 0.0
     alerts.hearing_detected(rig.ts, {"cls": "bang", "score": 50.0})
     res = alerts.hearing_detected(rig.ts, {"cls": "knock", "score": 60.0, "info": {"label": "Knock", "confidence": 0.7}})

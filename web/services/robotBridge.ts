@@ -178,6 +178,12 @@ class RobotBridge {
     return res && res.display ? (res.display as ScreenDisplay) : null;
   }
 
+  /** The Gemini key saved on the Pupper (~/.config/gemini-pupper/api_key), or '' if none. */
+  async getApiKey(): Promise<string> {
+    const res = await this.request('/config/api_key', 'GET');
+    return res?.api_key || '';
+  }
+
   /** What Pupper hears right now (YAMNet's top label), or null for silence or when sound alerts are off. */
   async getHearingNow(): Promise<string | null> {
     const res = await this.request('/hearing/now', 'GET');
@@ -195,7 +201,7 @@ class RobotBridge {
   }
 
   /** The local brain (robot/gemma_brain.py): listening, speaking, the caption, and how fresh that is. */
-  async getBrainState(): Promise<{ listening: boolean; speaking: boolean; caption: string | null; age_s: number | null; local: boolean } | null> {
+  async getBrainState(): Promise<{ listening: boolean; speaking: boolean; caption: string | null; age_s: number | null; local: boolean; text: boolean } | null> {
     return this.request('/brain/state', 'GET');
   }
 

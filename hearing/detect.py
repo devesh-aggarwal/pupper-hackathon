@@ -58,7 +58,8 @@ DEFAULT_PARAMS: dict = {
     "alarm": {"threshold": 25.0, "above_floor_db": 10.0, "periodicity_max": 0.5, "hz_tol": 25.0,
               "window_s": 3.0, "duty": 0.4, "rearm_s": 5.0},
     "knock": {"threshold": 20.0, "rise_db": 12.0, "rise_s": 0.06, "fall_db": 10.0, "fall_s": 0.15,
-              "min_gap_s": 0.12, "max_gap_s": 0.8, "min_knocks": 2, "tone_max_db": 25.0},
+              "min_gap_s": 0.12, "max_gap_s": 0.8, "min_knocks": 2, "tone_max_db": 25.0,
+              "soft_below_db": 8.0},   # live: knocks this far under threshold go to YAMNet to confirm (KnockGate)
     "siren": {"threshold": 25.0, "above_floor_db": 10.0, "periodicity_max": 0.6, "min_hz": 530.0,
               "smooth_hz": 30.0, "window_s": 3.0, "tonal_frac": 0.75, "min_sweep_hz": 150.0, "rearm_s": 8.0},
     "refractory_s": 1.0,
@@ -333,8 +334,9 @@ class LiveDetector:
 
     WINDOW_S = 8.0
 
-    def __init__(self, params: dict | None = None, classes=CLASSES):
+    def __init__(self, params: dict | None = None, classes=CLASSES, soft_knocks: bool = False):
         self.p = merged_params(params)
+        self.soft_knocks = soft_knocks  # only with YAMNet to confirm them (listener.py)
         self.classes = tuple(classes)   # with YAMNet (classify.py), only bang and shout come from here
         self.last_t0 = {c: -math.inf for c in CLASSES}
         self.tonal_seen_t = {c: -math.inf for c in TONAL}
@@ -351,6 +353,14 @@ class LiveDetector:
         # The first 300 ms of the window is onset context; alarms need a full duty window behind them.
         events = find_events(window, p, classes=tuple(c for c in ("bang", "shout", "knock") if c in self.classes), skip_before=32)
         new = []
+        if "knock" in self.classes and self.soft_knocks:
+            # Softer knocks too, marked soft: KnockGate keeps them only if YAMNet hears a knock.
+            soft = p["knock"]["threshold"] - p["knock"]["soft_below_db"]
+            hard = {round(e["t0"], 2) for e in events if e["cls"] == "knock"}
+            for e in knock_events(window, p, soft, True, 32):
+                if e["score"] < p["knock"]["threshold"] and round(e["t0"], 2) not in hard:
+                    events.append({**e, "info": {**e["info"], "soft": True}})
+            events.sort(key=lambda e: e["t0"])
         for ev in events:
             if ev["t0"] >= self.last_t0[ev["cls"]] + p["refractory_s"] - 1e-6:
                 new.append(ev)

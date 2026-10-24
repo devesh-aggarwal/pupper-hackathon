@@ -244,7 +244,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
                     failed += 1
                     if failed >= STUCK_LEGS:
                         return done(False, f"boxed in: nothing open in any direction {STUCK_LEGS} times in a row; no {name}"
-                                           f" seen in {legs} legs. Ask the person to clear some floor, or tell me where to look")
+                                           f" seen in {legs} legs. Ask the person where to look")
                 else:
                     bearing, leg = choice
                 # 4. turn to it (turning in place is always allowed)
@@ -276,7 +276,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
                 failed = failed + 1 if walked < MIN_LEG_M else 0
                 if failed >= STUCK_LEGS:
                     return done(False, f"boxed in: {STUCK_LEGS} legs in a row could not start; no {name} seen in {legs} legs."
-                                       " Ask the person to clear some floor, or tell me where to look")
+                                       " Ask the person where to look")
             return done(False, f"no {name} found in {max_s:.0f} s and {legs} legs; I have seen about"
                                f" {len(pose.visited)} square metres. Ask me to keep looking, or say where it might be")
         except asyncio.CancelledError:
@@ -298,8 +298,8 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
     " for everyday things, Gemma for anything you can name, and its memory of where things were), then"
     " turns a full circle in steps looking after each, then roams the room, stopping for anything in the"
     " way, for up to max_seconds. Found: you are told where (a [search result]) and Pupper walks up to it."
-    " Not found: you are told that too. Only when a person asks; roaming needs clear floor and someone"
-    " watching. For a thing you can already see, go_to is quicker." + " If follow mode is on, this ends it: say so first.",
+    " Not found: you are told that too. Only when a person asks. For a thing you can already see, go_to is"
+    " quicker." + " If follow mode is on, this ends it: say so first.",
     what=Param("string", "What to find, in a few words: 'the red mug', 'a chair', 'the white container', 'a person'."),
     max_seconds=Param("number", f"How long at most, 5 to {MAX_S_LIMIT:g} s (default {MAX_S_DEFAULT:g}); a turn in place is about 20 s of it.", required=False),
 )
