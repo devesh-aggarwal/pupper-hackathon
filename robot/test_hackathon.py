@@ -737,6 +737,20 @@ async def explore_tests() -> None:
     res = await call(rig, "find", what="a chair", max_seconds=1000)
     check("a search over the time limit is refused with the limit", not res.ok and "300" in res.message, res.message)
 
+    # The same search again before it ends (a model may call find twice in one turn): one search,
+    # not two. A stop drops it, and then the same search can start again.
+    first = await tools.call(rig.ts, "find", {"what": "the red mug", "max_seconds": 10})
+    second = await tools.call(rig.ts, "find", {"what": "my red mug", "max_seconds": 10})
+    pending = rig.ts.status()
+    check("find again while that search is pending: 'already looking', nothing more queued",
+          first.ok and second.ok and "already looking for the red mug" in second.message
+          and pending["queued"] + pending["running"] <= 1, f"{second.message} {pending}")
+    await tools.call(rig.ts, "stop", {})
+    await rig.settle()
+    third = await tools.call(rig.ts, "find", {"what": "the red mug", "max_seconds": 10})
+    check("... after a stop, the same search starts again", third.ok and "already" not in third.message, third.message)
+    await rig.settle()
+
     # In view already: found right away, and a go_to follows.
     depth()
     see(("cup", box(0.8, 0.2, 0.3, 0.9)))

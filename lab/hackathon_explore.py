@@ -52,7 +52,7 @@ SWEEP_STEPS = 5  # 5 turns + the look before the first one = 6 looks around the 
 SECTORS = [("left", -60.0), ("center-left", -30.0), ("center", 0.0), ("center-right", 30.0), ("right", 60.0)]
 MIN_LEG_M = 0.1  # a leg shorter than this did not start
 
-EXPLORING: dict = {"name": "", "since": 0.0}
+EXPLORING: dict = {"name": "", "since": 0.0, "started": False}  # started: the queued search began
 rng = random.Random()
 
 
@@ -153,6 +153,11 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
         return Result(False, f"max_seconds must be a number of seconds, at most {MAX_S_LIMIT:g}")
     if not 5.0 <= max_s <= MAX_S_LIMIT:
         return Result(False, f"max_seconds must be between 5 and {MAX_S_LIMIT:g} s (asked {max_s:g})")
+    # The same search again while one is queued or running would roam twice. A queued search that a
+    # stop dropped never starts, so it only counts while something is still queued or running.
+    status = robot.status()
+    if EXPLORING["name"] == name and (EXPLORING["started"] or status["queued"] or status["running"]):
+        return Result(True, f"already looking for the {name}: you'll get a [search result] when that search ends")
     from part2_walk import check_move  # here, not at the top: part2_walk imports hackathon_vision
 
     speeds = robot.speeds()
@@ -168,14 +173,14 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
     state = robot.state_after_queue
     walker = robot.walking_controller(state)
     then = state if walker != LOCOMOTION_CONTROLLER else LOCOMOTION
-    EXPLORING.update(name=name, since=time.time())
+    EXPLORING.update(name=name, since=time.time(), started=False)
     last = memory.where_is(name)
     cannot = (f" My detector doesn't know '{name}'; my eyes ask Gemma for it at each stop, and your eyes on the camera matter too."
               if not any(vision._matches(name, c) for c in vision.COCO_NAMES) else "")
 
     def done(ok: bool, text: str, *, found: dict | None = None) -> Result:
         robot.send_speed(0, 0, 0)
-        EXPLORING.update(name="", since=0.0)
+        EXPLORING.update(name="", since=0.0, started=False)
         if found:
             where = (f"{vision.side_of({'box': found['box']})}, {vision.how_close({'box': found['box']})}" if found.get("box")
                      else "in view from where I stopped")
@@ -196,6 +201,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
 
     async def job() -> Result:
         pose = DeadReckoning()
+        EXPLORING["started"] = True
         try:
             if robot.fallen:
                 return Result(False, FELL_MESSAGE)
@@ -274,7 +280,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
             return done(False, f"no {name} found in {max_s:.0f} s and {legs} legs; I have seen about"
                                f" {len(pose.visited)} square metres. Ask me to keep looking, or say where it might be")
         except asyncio.CancelledError:
-            EXPLORING.update(name="", since=0.0)
+            EXPLORING.update(name="", since=0.0, started=False)
             raise
 
     intro = (f"Finding the {name}:" + (f" last noted {last}." if last else "") + " I look, then turn a full circle in"
