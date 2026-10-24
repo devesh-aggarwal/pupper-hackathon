@@ -697,13 +697,28 @@ an ssh connection, kept up in the background, that makes the two ports `localhos
    saves it. Then it copies this checkout to `~/pupper-hackathon` on the Pupper (`tools/pup sync`).
 2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11435
    (16k context, Gemma kept loaded; an Ollama app you already run is left alone, they share the
-   models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `base.en` model,
+   models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `large-v3-turbo` model,
    the first time). Both listen on the Mac only.
 3. Starts the link and checks the Pupper sees both servers through it.
 4. Runs `./run_pupper.sh` on the Pupper (below).
 
 Ctrl+C stops the robot. The servers and the link keep running (until the Mac sleeps or restarts),
 so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_mac.sh stop` ends them.
+
+**Hearing.** The Pupper decides you stopped talking with Silero VAD, a small speech detector
+(`~/.cache/pupper/silero_vad.onnx`, from `robot/setup_voice.sh`): by loudness alone, a noisy room
+never sounded quiet and whisper got 15 s of noise at a time. Each utterance is at most 8 s.
+whisper is `large-v3-turbo` (about 0.5 s a sentence on an M4 Pro), told Pupper's own words
+("stand up", "push-up") as a hint. Piper's voice is loaded once, not for every sentence.
+
+**Watching it on the Mac.** Everything heavy runs on the Mac's GPU, in short bursts (Gemma 4 26B
+uses 4B parameters per token), so the Mac may not get warm. While the link is up:
+
+- `http://localhost:8000`: Pupper's own app (its face, and the debug view).
+- `tail -f ~/.cache/pupper/logs/ollama.log`: a line for each Gemma request, with its time.
+- `OLLAMA_HOST=127.0.0.1:11435 ollama ps`: the model, loaded, at "100% GPU".
+- `tail -f ~/.cache/pupper/logs/whisper.log`: each utterance whisper heard, and its length.
+- Activity Monitor, Window, GPU History: the bursts as you talk.
 
 **On the Pupper**, `./run_pupper.sh` checks it can reach Gemma and whisper through the link
 (`gemma_brain.py --check --voice`; if not, it says to run `./run_pupper.sh` on the Mac and starts
@@ -775,8 +790,8 @@ What it does not do yet, compared with Gemini Live:
 
 - **No interrupting.** The mic is off while Pupper talks (or it would hear itself), so "stop" isn't
   heard mid-sentence; the e-stop is.
-- **Slower turns**: the end of your sentence (0.8 s of quiet), whisper, then Gemma. `--check`
-  prints Gemma's times; the first call after a start loads the model (10-30 s).
+- **Slower turns**: the end of your sentence (0.7 s without speech), whisper (about 0.5 s), Gemma,
+  then Piper making the sound. The terminal prints each one's time, every turn.
 
 ## Hackathon plan
 

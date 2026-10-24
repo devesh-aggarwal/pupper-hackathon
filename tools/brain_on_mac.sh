@@ -12,12 +12,13 @@
 # Ctrl+C stops the robot. The servers and the link keep running, so ./run_pupper.sh on the Pupper
 # itself works too, until the Mac sleeps or restarts.   tools/brain_on_mac.sh stop   ends them.
 # Gemma is gemma4:26b once it is pulled (ollama pull gemma4:26b, about 17 GB, once); until then the
-# best Gemma this Mac already has. The first run also downloads whisper's model (about 150 MB).
+# best Gemma this Mac already has. The first run also downloads whisper's model (about 550 MB).
+# While the link is up, http://localhost:8000 on this Mac is Pupper's app (its face and debug view).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 PUP="$HERE/tools/pup"
 WANT=gemma4:26b    # the best brain this Mac can run: a mixture of experts, 4B active per token
-WHISPER_MODEL=${PUPPER_WHISPER_MODEL:-base.en}
+WHISPER_MODEL=${PUPPER_WHISPER_MODEL:-large-v3-turbo-q5_0}  # far better than base.en in a noisy room; fast on the GPU
 OLLAMA_PORT=11435  # not 11434: the Ollama app may hold that
 WHISPER_PORT=8178
 CACHE=$HOME/.cache/pupper
@@ -28,7 +29,7 @@ die() { echo "!! $*" >&2; exit 1; }
 alive() { [ -f "$CACHE/$1.pid" ] && kill -0 "$(cat "$CACHE/$1.pid")" 2>/dev/null; }
 
 if [ "${1:-}" = stop ]; then
-  for name in link whisper ollama; do alive $name && kill "$(cat "$CACHE/$name.pid")" && echo "stopped $name"; rm -f "$CACHE/$name.pid"; done
+  for name in web link whisper ollama; do alive $name && kill "$(cat "$CACHE/$name.pid")" && echo "stopped $name"; rm -f "$CACHE/$name.pid"; done
   pkill -f "ssh .*-R $OLLAMA_PORT:localhost:$OLLAMA_PORT" 2>/dev/null
   exit 0
 fi
@@ -72,6 +73,10 @@ if ! ollama show "$WANT" >/dev/null 2>&1; then
 fi
 
 whisper_up() { curl -sf -m 2 -o /dev/null "http://127.0.0.1:$WHISPER_PORT/"; }
+if whisper_up && [ "$(cat "$CACHE/whisper.model" 2>/dev/null)" != "$WHISPER_MODEL" ]; then  # an older model: swap it
+  alive whisper && kill "$(cat "$CACHE/whisper.pid")"
+  pkill -f "whisper-server .*--port $WHISPER_PORT" 2>/dev/null; sleep 1
+fi
 if ! whisper_up; then
   if ! command -v whisper-server >/dev/null; then
     command -v brew >/dev/null || die "no whisper-server and no Homebrew (brew.sh): install one, then brew install whisper.cpp"
@@ -86,11 +91,11 @@ if ! whisper_up; then
       && mv "$WM.part" "$WM" || die "the whisper model download failed"
   fi
   nohup whisper-server -m "$WM" -l en --host 127.0.0.1 --port $WHISPER_PORT > "$LOG/whisper.log" 2>&1 &
-  echo $! > "$CACHE/whisper.pid"
+  echo $! > "$CACHE/whisper.pid"; echo "$WHISPER_MODEL" > "$CACHE/whisper.model"
   for _ in $(seq 30); do whisper_up && break; sleep 1; done
   whisper_up || die "whisper-server didn't start (log $LOG/whisper.log)"
 fi
-echo "brain: Ollama :$OLLAMA_PORT, whisper :$WHISPER_PORT (logs in $LOG)"
+echo "brain: Ollama :$OLLAMA_PORT, whisper :$WHISPER_PORT ($WHISPER_MODEL) (logs in $LOG)"
 
 # --- 3. the link: the two ports on the Pupper, through ssh, reconnecting whenever it drops
 pupper_sees_brain() { "$PUP" sh "curl -sf -m 3 localhost:$OLLAMA_PORT/api/version >/dev/null && curl -sf -m 3 -o /dev/null localhost:$WHISPER_PORT/" >/dev/null 2>&1; }
@@ -104,6 +109,12 @@ fi
 for _ in $(seq 20); do pupper_sees_brain && break; sleep 1; done
 pupper_sees_brain || die "the Pupper can't see the brain through the link (log $LOG/link.log)"
 echo "link: up (the Pupper reaches the brain at localhost:$OLLAMA_PORT and :$WHISPER_PORT)"
+if ! alive web; then  # Pupper's app on this Mac; if port 8000 is taken here, it just keeps retrying
+  nohup bash -c "while true; do '$PUP' web; sleep 10; done" > "$LOG/web.log" 2>&1 &
+  echo $! > "$CACHE/web.pid"
+fi
+echo "watch: http://localhost:8000 (Pupper's app), tail -f $LOG/ollama.log (each Gemma request),"
+echo "       OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT ollama ps (the model on the GPU)"
 
 # --- 4. the Pupper
 echo

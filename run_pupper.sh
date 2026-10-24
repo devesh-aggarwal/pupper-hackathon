@@ -49,7 +49,8 @@ if ! curl -sf -m 3 "$PUPPER_OLLAMA/api/version" >/dev/null; then
   exit 1
 fi
 python3 robot/gemma_brain.py --check --voice || { echo "nothing started: the Pupper can't use the brain on the Mac (above)"; exit 1; }
-[ -f "${PUPPER_PIPER_VOICE:-$HOME/.local/share/piper/en_US-lessac-medium.onnx}" ] || "$HERE/robot/setup_voice.sh"
+[ -f "${PUPPER_PIPER_VOICE:-$HOME/.local/share/piper/en_US-lessac-medium.onnx}" ] && [ -f "$HOME/.cache/pupper/silero_vad.onnx" ] \
+  || "$HERE/robot/setup_voice.sh"
 
 # --- 1. the web app build (web/dist), rebuilt when its sources changed. By content, not by date:
 # tools/pup sync copies the Mac's dates, which can be older than the last build here.

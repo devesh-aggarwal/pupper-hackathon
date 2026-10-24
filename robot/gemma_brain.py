@@ -476,6 +476,73 @@ class Endpointer:
         return None
 
 
+VAD_MODEL = Path(os.environ.get("PUPPER_VAD_MODEL", Path.home() / ".cache/pupper/silero_vad.onnx"))
+
+
+class SileroEndpointer:
+    """Cuts 16 kHz audio into utterances with Silero VAD (a small speech detector, ONNX, ~2 MB). It
+    hears speech, not loudness, so a noisy hall, the motors or music don't keep an utterance open
+    (by loudness alone, a busy room made 15 s "utterances" of noise that whisper turned to nonsense).
+    Used like Endpointer: feed() 32 ms frames; an utterance comes out when it has ended."""
+
+    def __init__(self, model: Path = VAD_MODEL, rate: int = 16000, start_s: float = 0.1, end_s: float = 0.7,
+                 min_s: float = 0.3, max_s: float = 8.0, pre_s: float = 0.3, on: float = 0.5, off: float = 0.35):
+        import numpy as np
+        import onnxruntime as ort
+
+        opts = ort.SessionOptions()
+        opts.inter_op_num_threads = opts.intra_op_num_threads = 1
+        self.np, self.sess = np, ort.InferenceSession(str(model), opts, providers=["CPUExecutionProvider"])
+        self.rate, self.n = rate, 512  # Silero's frame at 16 kHz, plus 64 samples of the last one as context
+        self.frame_bytes, self.frame_s = self.n * 2, self.n / rate
+        self.start_s, self.end_s, self.min_s, self.max_s, self.on, self.off = start_s, end_s, min_s, max_s, on, off
+        self.pre_frames = max(1, round(pre_s / self.frame_s))
+        self.reset()
+
+    def reset(self) -> None:
+        np = self.np
+        self.state, self.context = np.zeros((2, 1, 128), np.float32), np.zeros((1, 64), np.float32)
+        self.pre: collections.deque = collections.deque(maxlen=self.pre_frames)
+        self.buf: list[bytes] = []
+        self.voiced_run = self.quiet_run = 0
+        self.speaking = False
+
+    def prob(self, frame: bytes) -> float:
+        np = self.np
+        x = np.frombuffer(frame, np.int16).astype(np.float32)[None, :] / 32768.0
+        out, self.state = self.sess.run(None, {"input": np.concatenate([self.context, x], axis=1), "state": self.state,
+                                               "sr": np.array(self.rate, np.int64)})
+        self.context = x[:, -64:]
+        return float(np.asarray(out).ravel()[0])
+
+    def feed(self, frame: bytes) -> bytes | None:
+        p = self.prob(frame)
+        if not self.speaking:
+            self.pre.append(frame)
+            self.voiced_run = self.voiced_run + 1 if p >= self.on else 0
+            if self.voiced_run * self.frame_s >= self.start_s:
+                self.speaking, self.buf, self.quiet_run = True, list(self.pre), 0
+            return None
+        self.buf.append(frame)
+        self.quiet_run = self.quiet_run + 1 if p < self.off else 0
+        length = len(self.buf) * self.frame_s
+        if self.quiet_run * self.frame_s >= self.end_s or length >= self.max_s:
+            pcm, speech_s = b"".join(self.buf), length - self.quiet_run * self.frame_s
+            self.reset()
+            return pcm if speech_s >= self.min_s else None
+        return None
+
+
+def endpointer(rate: int = 16000):
+    """Silero when its model and onnxruntime are here (robot/setup_voice.sh), else loudness."""
+    try:
+        if VAD_MODEL.exists():
+            return SileroEndpointer(VAD_MODEL, rate)
+    except Exception as e:  # e.g. no onnxruntime
+        print(f"  (Silero VAD unavailable: {e}; cutting speech by loudness)")
+    return Endpointer(rate, max_s=8.0)
+
+
 class Mic:
     """The mic through arecord (16 kHz mono, the PipeWire default unless --mic says otherwise)."""
 
@@ -484,7 +551,8 @@ class Mic:
 
     def run(self, on_utterance, muted) -> None:
         """Blocks: calls on_utterance(pcm) for each utterance, ignoring the mic while muted() is true."""
-        ep = Endpointer(self.rate)
+        ep = endpointer(self.rate)
+        print(f"Ears: {type(ep).__name__} ({'speech detector' if isinstance(ep, SileroEndpointer) else 'loudness'})", flush=True)
         cmd = ["arecord", "-q", "-D", self.device, "-f", "S16_LE", "-r", str(self.rate), "-c", "1", "-t", "raw"]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         try:
@@ -535,8 +603,12 @@ class Whisper:
     def __init__(self, url: str, timeout: float = 30.0):
         self.url, self.timeout = url.rstrip("/"), timeout
 
+    # Words whisper should expect: it spells what it already knows (a hint, not a restriction).
+    PROMPT = ("Pupper, stand up, sit down, lie down, walk forward, turn left, turn right, push-up, "
+              "shake your paw, follow me, stop, remind me, remember, find my cup.")
+
     def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
-        body, ctype = multipart({"response_format": "json", "temperature": "0.0"},
+        body, ctype = multipart({"response_format": "json", "temperature": "0.0", "prompt": self.PROMPT},
                                 "file", "speech.wav", to_wav(pcm, rate), "audio/wav")
         req = urllib.request.Request(self.url + "/inference", data=body, headers={"Content-Type": ctype})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
@@ -556,6 +628,16 @@ class Speaker:
             engine = ("piper" if Path(self.piper).exists() and Path(piper_voice).exists()
                       else "espeak" if shutil.which("espeak-ng") else "print")
         self.engine, self.piper_voice, self.device = engine, Path(piper_voice), device
+        self.voice = None  # Piper's voice, loaded once: the command line reloads it for every sentence (1-2 s)
+        if engine == "piper":
+            try:
+                try:
+                    from piper import PiperVoice  # piper-tts 1.3
+                except ImportError:
+                    from piper.voice import PiperVoice  # piper-tts 1.2
+                self.voice = PiperVoice.load(str(self.piper_voice))
+            except Exception as e:
+                print(f"  (Piper's voice not loaded in this process: {e}; using its command line)")
         self.q: queue.Queue = queue.Queue()
         self.speaking = threading.Event()
         self.quiet_until = 0.0
@@ -588,7 +670,13 @@ class Speaker:
 
     def _speak(self, text: str) -> None:
         aplay = ["aplay", "-q"] + (["-D", self.device] if self.device else [])
-        if self.engine == "piper":
+        if self.voice is not None:
+            t0, buf = time.time(), io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                (getattr(self.voice, "synthesize_wav", None) or self.voice.synthesize)(text, w)
+            print(f"  (voice: {time.time() - t0:.1f} s to make the sound)", flush=True)
+            subprocess.run(aplay + ["-"], input=buf.getvalue(), check=True)
+        elif self.engine == "piper":
             with tempfile.NamedTemporaryFile(suffix=".wav") as f:
                 subprocess.run([self.piper, "-m", str(self.piper_voice), "-f", f.name], input=text.encode(),
                                check=True, capture_output=True)
@@ -619,8 +707,10 @@ async def voice_loop(brain: Brain, backend, mic: Mic, stt: Whisper, speaker: Spe
     def listen() -> None:
         while True:
             pcm = heard.get()
+            t0 = time.time()
             try:
                 text = stt.transcribe(pcm, mic.rate)
+                print(f"  (whisper: {time.time() - t0:.1f} s for {len(pcm) / 2 / mic.rate:.1f} s of speech)", flush=True)
             except (urllib.error.URLError, OSError, ValueError) as e:
                 print(f"  !! whisper did not answer: {e}")
                 continue

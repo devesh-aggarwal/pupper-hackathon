@@ -7,6 +7,7 @@
 #   ./pup sh <cmd...>           run a shell command on the Pi
 #   ./pup tty <cmd...>          the same in a terminal, so Ctrl+C here reaches it there
 #   ./pup link                  hold an ssh connection that makes PUPPER_TUNNEL_PORTS here localhost on the Pi
+#   ./pup web                   hold an ssh connection that makes the Pi's app http://localhost:8000 here
 #   ./pup sudo <cmd...>         run a command as root on the Pi
 #   ./pup run <file> [args]     copy a local script to the Pi and run it (.py, .sh, or executable)
 #   ./pup gui <file> [args]     same as run, but attached to Pupper's display
@@ -86,6 +87,8 @@ case "$cmd" in
          fwd=(-N -o ControlPath=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
          for p in ${PUPPER_TUNNEL_PORTS:-}; do fwd+=(-R "$p:localhost:$p"); done
          ssh "${fwd[@]}" "${SSH_OPTS[@]}" "$HOST" ;;
+  web)   ssh -N -o ControlPath=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+           -L 8000:localhost:8000 "${SSH_OPTS[@]}" "$HOST" ;;
   sudo)  [ $# -gt 0 ] || die "usage: pup sudo <cmd...>"; remote "sudo bash -c $(printf '%q' "$*")" ;;
   run)   [ $# -gt 0 ] || die "usage: pup run <file> [args]"; remote "$(stage "$@")" ;;
   gui)   [ $# -gt 0 ] || die "usage: pup gui <file> [args]"; remote "$GUI_ENV $(stage "$@")" ;;
