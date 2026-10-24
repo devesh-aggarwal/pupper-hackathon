@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pupper mic</title>
+<style>
+  body { margin:0; background:#0e1116; color:#d7dde5; font:14px system-ui, sans-serif; padding:12px 16px; }
+  #laf { font:600 44px ui-monospace, monospace; }
+  #clip { color:#fff; background:#ff4d6d; padding:2px 8px; border-radius:4px; margin-left:10px; font-size:14px; vertical-align:middle; }
+  canvas { width:100%; height:320px; display:block; background:#161b22; border-radius:8px; margin-top:10px; }
+  #events { list-style:none; padding:0; margin:10px 0 0; font:13px ui-monospace, monospace; }
+  #active span { color:#000; padding:2px 10px; border-radius:4px; margin-left:10px; font:600 20px system-ui; vertical-align:middle; }
+  .tag { display:inline-block; min-width:48px; text-align:center; border-radius:4px; color:#000; margin-right:6px; }
+</style>
+</head>
+<body>
+<div><span id="laf">--</span><span id="clip" hidden>CLIP</span><span id="active"></span></div>
+<div id="hears" style="margin-top:6px; color:#8b95a3; font:13px ui-monospace, monospace"></div>
+<canvas id="levels"></canvas>
+<ul id="events"></ul>
+
+<script>
+const SPAN = 10;  // seconds shown
+const COLS = ["t", "laf", "lc_max", "floor_a", "floor_c", "clip"];
+const COLOR = { bang: "#f4a261", shout: "#7ae582", alarm: "#c77dff", siren: "#ff4d6d", doorbell: "#4cc9f0", crash: "#ff9f1c", knock: "#9bf6ff", baby: "#ffc6ff" };
+const buf = Object.fromEntries(COLS.map(c => [c, []]));
+let events = [], params = null, dirty = true, active = {};
+const $ = id => document.getElementById(id);
+
+function connect() {
+  const ws = new WebSocket("ws://" + location.host + "/ws");
+  ws.onmessage = m => {
+    const msg = JSON.parse(m.data);
+    if (msg.type === "hello") { params = msg.state.params; events = msg.events.slice(-20); renderEvents(); }
+    else if (msg.type === "frames") addFrames(msg);
+    else if (msg.type === "event") { events.push(msg.event); renderEvents(); }
+    else if (msg.type === "hears") {
+      $("hears").textContent = "hears: " + msg.top.map(([n, s]) => `${n} ${Math.round(s * 100)}%`).join(" · ");
+    }
+    else if (msg.type === "active") {
+      for (const c in active) if (active[c] && !msg.active[c]) {   // it just ended: keep where it ended
+        const last = events.filter(x => x.cls === c).at(-1);
+        if (last && buf.t.length) last.t1 = buf.t[buf.t.length - 1];
+      }
+      active = msg.active; renderActive();
+    }
+  };
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+setInterval(() => fetch("/state").then(r => r.json()).then(s => { params = s.params; }).catch(() => {}), 2000);
+
+function addFrames(msg) {
+  const last = buf.t.length ? buf.t[buf.t.length - 1] : -Infinity;
+  const start = msg.cols.t.findIndex(t => t > last);
+  if (start < 0) return;
+  for (const c of COLS) buf[c].push(...msg.cols[c].slice(start));
+  const drop = buf.t.length - (SPAN * 100 + 50);
+  if (drop > 0) for (const c of COLS) buf[c].splice(0, drop);
+  dirty = true;
+}
+
+function renderActive() {
+  $("active").innerHTML = Object.keys(active).filter(c => active[c])
+    .map(c => `<span style="background:${COLOR[c]}">${c.toUpperCase()}</span>`).join("");
+}
+function renderEvents() {
+  $("events").innerHTML = events.slice(-20).reverse().map(e =>
+    `<li><span class="tag" style="background:${COLOR[e.cls]}">${e.cls}</span>` +
+    `${new Date(e.wall * 1000).toLocaleTimeString()} ` +
+    (e.info && e.info.label ? `${e.info.label} ${Math.round(e.info.confidence * 100)}%` : `+${e.score.toFixed(1)} dB`) + `</li>`).join("");
+}
+
+function draw() {
+  const cv = $("levels"), r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
+  cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+  const g = cv.getContext("2d"), W = cv.width, H = cv.height, n = buf.t.length;
+  if (!n || !params) return;
+  $("laf").textContent = buf.laf[n - 1].toFixed(1) + " dB";
+  $("clip").hidden = !buf.clip.slice(-200).some(x => x > 0);
+  const tNow = buf.t[n - 1], lo = -100, hi = 0;
+  const X = t => (1 - (tNow - t) / SPAN) * W, Y = v => H - (Math.max(lo, v) - lo) / (hi - lo) * H;
+  g.strokeStyle = "#2a313c"; g.lineWidth = d;
+  for (let v = lo; v <= hi; v += 10) { g.beginPath(); g.moveTo(0, Y(v)); g.lineTo(W, Y(v)); g.stroke(); }
+  for (const e of events) {
+    const t1 = active[e.cls] && e === events.filter(x => x.cls === e.cls).at(-1) ? tNow : e.t1;  // still going
+    if (t1 < tNow - SPAN) continue;
+    g.fillStyle = COLOR[e.cls] + "33"; g.fillRect(X(e.t0), 0, Math.max(2 * d, X(t1) - X(e.t0)), H);
+  }
+  const line = (val, color, width, dash) => {
+    g.strokeStyle = color; g.lineWidth = width * d; g.setLineDash(dash ? dash.map(x => x * d) : []);
+    g.beginPath();
+    for (let i = 0; i < n; i++) { const x = X(buf.t[i]), y = Y(val(i)); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.stroke(); g.setLineDash([]);
+  };
+  const fa = i => Math.max(buf.floor_a[i], params.floor_ref_a ?? -999);
+  const fc = i => Math.max(buf.floor_c[i], params.floor_ref_c ?? -999);
+  line(i => fa(i) + params.shout.threshold, COLOR.shout, 1, [6, 4]);
+  line(i => fc(i) + params.bang.threshold, COLOR.bang, 1, [6, 4]);
+  line(i => buf.lc_max[i], "#f4a261aa", 1);
+  line(i => buf.laf[i], "#4cc9f0", 2);
+}
+
+function frame() { if (dirty) { draw(); dirty = false; } requestAnimationFrame(frame); }
+connect(); frame();
+</script>
+</body>
+</html>

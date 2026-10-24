@@ -1,0 +1,15 @@
+# Parameters for the nodes gemini_pupper.launch.py adds on top of the course's
+# neural_controller launch (installed by pupper_gait_deploy).
+
+joint_state_throttler:
+  ros__parameters:
+    input_topic: /joint_states
+    output_topic: /joint_states_throttled
+    msgs_per_sec: 10.0
+
+# Joystick (/teleop_cmd_vel) outranks Gemini (/llm_cmd_vel) outranks the person
+# follower; a source that goes quiet for 500 ms is dropped.
+cmd_vel_mux:
+  ros__parameters:
+    deadband: 0.05
+    timeout_ms: 500

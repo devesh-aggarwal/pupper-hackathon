@@ -1,0 +1,9 @@
+# One of the Pupper monorepo's 13 recorded tricks, as a tracking policy:
+# monorepo_tricks.py replayed the recording in simulation like the robot's old
+# player did (same speed), and the policy was trained on that motion.
+description: Lies down, sits up on its front legs, then lies back down and stays lying.
+type: policy
+policy: policy.json
+start_pose: standing
+end_pose: lying
+max_body_angle_deg: 65   # the reference tilts up to 44 degrees

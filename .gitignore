@@ -1,0 +1,55 @@
+.venv*/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+*.gguf
+*.task
+*.litertlm
+api_key
+.env
+.claude/settings.local.json
+web/node_modules/
+web/dist/
+web/.env.local
+
+# From the Lab 6 repo
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python
+__pycache__/
+
+# Secrets never go in the repo (the Gemini key lives in ~/.config/gemini-pupper/api_key)
+.env
+.env.*
+api_key
+
+# Hackathon memory lives in ~/.config/gemini-pupper/memory.json (PUPPER_MEMORY_FILE); never in the repo
+memory.json
+
+# the eyes service downloads its depth model here (vision/eyes.py --fetch-depth-model)
+vision/models/

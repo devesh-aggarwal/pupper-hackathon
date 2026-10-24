@@ -1,0 +1,24 @@
+# spider_walk: an interactive trick that walks in its own stance (Lab 6, Part 6),
+# fetched with get_trick.py: the clip policy plus the spider walking policy.
+description: >-
+  Lies down low like a sneaky spider, legs splayed wide and wiggling, and stays in
+  that spider stance. Use it when someone says "be a spider", "spider" or asks it
+  to sneak or creep. While it is a spider, move, turn and arc make it creep around
+  low to the ground. To leave, ask for spider_up (or any other trick or stand_up):
+  it wiggles back up to standing first.
+type: policy
+policy: policy.json
+start_pose: standing
+end_pose: spider
+max_body_angle_deg: 60
+actions:
+  spider_up: Wiggles its legs and pushes back up to standing, then goes back to normal walking.
+exit_clip: spider_up
+walk:                      # it walks in its stance: move, turn and arc drive this policy
+  policy: walk_policy.json
+  speed: 0.08              # default m/s for move and arc
+  max_forward: 0.12        # m/s; trained for up to 0.15
+  max_sideways: 0.08       # m/s; trained for up to 0.1
+  turn: 25                 # deg/s; trained for up to 34
+  run: false
+  note: It creeps slowly, so keep spider moves short.

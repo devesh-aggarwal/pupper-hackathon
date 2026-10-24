@@ -1,0 +1,9 @@
+# Designed (design.py), replacing the monorepo recording: ah... ah... CHOO! (the front
+# legs fold fast), a tiny hop on the front feet, and back to a level stand. Trained as a
+# tracking policy with the front feet tracked tightly, so it really hops.
+description: From standing, a big dramatic sneeze. It breathes in with its nose up, ah... ah..., then CHOO! its front legs fold and it bounces back up with a little hop on its front feet, and ends standing.
+type: policy
+policy: policy.json
+start_pose: standing
+end_pose: standing
+max_body_angle_deg: 60   # the reference tilts up to 22 degrees

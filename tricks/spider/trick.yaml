@@ -1,0 +1,10 @@
+# One of the Pupper monorepo's 13 recorded tricks, as a tracking policy:
+# monorepo_tricks.py replayed the recording in simulation like the robot's old
+# player did (same speed), and the policy was trained on that motion.
+description: Lies down and wiggles its legs like a silly spider, ending lying down.
+type: policy
+policy: policy.json
+start_pose: standing
+end_pose: lying
+max_body_angle_deg: 60   # the reference tilts up to 10 degrees
+replaced_by: spider_walk   # spider_walk (Part 6) lies down like this, then walks in the stance

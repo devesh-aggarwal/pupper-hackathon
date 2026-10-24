@@ -1,0 +1,17 @@
+# sit_stay_shake: an interactive trick, fetched with get_trick.py (Lab 6, Part 5).
+# Gemini reads description and actions word for word.
+description: >-
+  Sits down like a dog and stays sitting, for as long as you like, until asked to
+  stand up. Use this whenever someone just says "sit" or "sit down" (they mean sit
+  and stay), and before shaking a paw. While it sits it can shake either paw on
+  request.
+type: policy
+policy: policy.json
+start_pose: standing
+end_pose: sitting
+max_body_angle_deg: 60   # the sit leans back about 35 degrees
+actions:
+  shake_left: Lifts and shakes the left front paw, like a handshake, then keeps sitting.
+  shake_right: Lifts and shakes the right front paw, like a handshake, then keeps sitting.
+  stand_up: Stands back up from sitting and goes back to normal walking.
+exit_clip: stand_up

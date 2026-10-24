@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Pupper AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Custom scrollbar for dark theme */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #1f2937;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #6b7280;
+      }
+      body {
+        background-color: #000;
+        color: #fff;
+        overflow: hidden; /* Prevent body scroll, handle in app */
+      }
+      /* Screen cards (show_text, reminders) and the sound-alert takeover */
+      @keyframes card-in { from { opacity: 0; transform: translateY(-16px) scale(0.97); } to { opacity: 1; transform: none; } }
+      @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes alert-flash { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
+      .card-in { animation: card-in 280ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+      .alert-in { animation: fade-in 200ms ease-out both, alert-flash 0.8s ease-in-out 3; }
+      @media (prefers-reduced-motion: reduce) { .card-in, .alert-in { animation: none; } }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.31.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# pup: quick dev loop for the Pupper. Run commands, copy files, and launch
+# scripts (including GUI apps on Pupper's screen) from your laptop.
+#
+#   ./pup setup                 one-time: create an SSH key and install it on the Pi
+#   ./pup                       interactive shell on the Pi
+#   ./pup sh <cmd...>           run a shell command on the Pi
+#   ./pup sudo <cmd...>         run a command as root on the Pi
+#   ./pup run <file> [args]     copy a local script to the Pi and run it (.py, .sh, or executable)
+#   ./pup gui <file> [args]     same as run, but attached to Pupper's display
+#   ./pup sync                  rsync this repo to ~/pupper-hackathon-setup on the Pi
+#   ./pup put <local> [remote]  copy a file or folder to the Pi (default: ~/)
+#   ./pup get <remote> [local]  copy a file or folder from the Pi (default: .)
+#   ./pup kill <pattern>        kill processes on the Pi matching a pattern
+#
+# Env overrides: PUPPER_HOST (default pi@pupper5.local), PUPPER_KEY (default ~/.ssh/pupper_ed25519),
+# PUPPER_PASSWORD (used only by `setup`).
+
+set -euo pipefail
+
+HOST="${PUPPER_HOST:-pi@pupper5.local}"
+KEY="${PUPPER_KEY:-$HOME/.ssh/pupper_ed25519}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REMOTE_REPO="pupper-hackathon-setup"
+SCRATCH="/tmp/pup"
+
+# Reuse one connection for all commands, so each call after the first is fast.
+SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+  -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath="$HOME/.ssh/pup-%r@%h:%p"
+  -o ControlPersist=10m)
+
+# Environment that lets programs draw on Pupper's screen (labwc Wayland session, with Xwayland on :0).
+GUI_ENV="export XDG_RUNTIME_DIR=/run/user/\$(id -u) WAYLAND_DISPLAY=wayland-0 DISPLAY=:0;"
+
+die() { echo "pup: $*" >&2; exit 1; }
+remote() { ssh "${SSH_OPTS[@]}" "$HOST" "$@"; }
+remote_tty() { ssh -t "${SSH_OPTS[@]}" "$HOST" "$@"; }
+quote_args() { local out="" a; for a in "$@"; do out+=" $(printf '%q' "$a")"; done; echo "$out"; }
+
+setup() {
+  [ -f "$KEY" ] || ssh-keygen -t ed25519 -N "" -C "pupper-dev" -f "$KEY" -q
+  if ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
+       -o StrictHostKeyChecking=accept-new "$HOST" true 2>/dev/null; then
+    echo "pup: key already works for $HOST"; return
+  fi
+  local pw="${PUPPER_PASSWORD:-}"
+  [ -n "$pw" ] || { read -rsp "Password for $HOST: " pw; echo; }
+  PUP_PW="$pw" expect -c "
+    set timeout 30
+    spawn ssh -o StrictHostKeyChecking=accept-new $HOST \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"
+    expect -re {(?i)password:} { send \"\$env(PUP_PW)\r\" }
+    send [exec cat $KEY.pub]; send \"\n\"; send \"\004\"
+    expect eof
+  " >/dev/null
+  remote true && echo "pup: key installed, passwordless access to $HOST works"
+}
+
+# Copy a local script to the Pi's scratch dir and print the command that runs it.
+stage() {
+  local file="$1"; shift
+  [ -f "$file" ] || die "no such file: $file"
+  remote "mkdir -p $SCRATCH"
+  scp -q "${SSH_OPTS[@]}" "$file" "$HOST:$SCRATCH/"
+  local name; name="$(basename "$file")"
+  case "$name" in
+    *.py) echo "cd $SCRATCH && python3 -u $name$(quote_args "$@")" ;;
+    *.sh) echo "cd $SCRATCH && bash $name$(quote_args "$@")" ;;
+    *)    echo "cd $SCRATCH && chmod +x $name && ./$name$(quote_args "$@")" ;;
+  esac
+}
+
+cmd="${1:-shell}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  setup) setup ;;
+  shell) remote_tty ;;
+  sh)    [ $# -gt 0 ] || die "usage: pup sh <cmd...>"; remote "$*" ;;
+  sudo)  [ $# -gt 0 ] || die "usage: pup sudo <cmd...>"; remote "sudo bash -c $(printf '%q' "$*")" ;;
+  run)   [ $# -gt 0 ] || die "usage: pup run <file> [args]"; remote "$(stage "$@")" ;;
+  gui)   [ $# -gt 0 ] || die "usage: pup gui <file> [args]"; remote "$GUI_ENV $(stage "$@")" ;;
+  sync)
+    rsync -az --delete -e "ssh $(quote_args "${SSH_OPTS[@]}")" \
+      --exclude .git --exclude '.venv*' --exclude __pycache__ --exclude .DS_Store --exclude .claude \
+      --exclude node_modules --exclude 'web/dist' --exclude .env.local --exclude hearing --exclude 'vision/models' \
+      "$REPO_DIR/" "$HOST:~/$REMOTE_REPO/"
+    echo "pup: synced to $HOST:~/$REMOTE_REPO" ;;
+  put)   [ $# -ge 1 ] || die "usage: pup put <local> [remote]"; scp -rq "${SSH_OPTS[@]}" "$1" "$HOST:${2:-~/}" ;;
+  get)   [ $# -ge 1 ] || die "usage: pup get <remote> [local]"; scp -rq "${SSH_OPTS[@]}" "$HOST:$1" "${2:-.}" ;;
+  kill)  [ $# -eq 1 ] || die "usage: pup kill <pattern>"; # Bracket the first character ("[s]leep") so the pattern doesn't match this remote shell's own command line.
+    pat="[${1:0:1}]${1:1}"
+    remote "pkill -e -f $(printf '%q' "$pat") || echo 'nothing matched'" ;;
+  -h|--help|help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$cmd' (try: pup help)" ;;
+esac
