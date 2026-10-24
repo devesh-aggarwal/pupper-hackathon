@@ -142,6 +142,12 @@ const App: React.FC = () => {
   // Persistent bridge instance for polling
   const bridgeRef = useRef<RobotBridge>(new RobotBridge(config.robotApiUrl));
 
+  // No key typed in Settings: use the one saved on the Pupper (GET /config/api_key).
+  useEffect(() => {
+    if (apiKey) return;
+    new RobotBridge(config.robotApiUrl).getApiKey().then(k => { if (k) setApiKey(k); });
+  }, [config.robotApiUrl]);
+
   useEffect(() => {
     bridgeRef.current = new RobotBridge(config.robotApiUrl);
   }, [config.robotApiUrl]);
@@ -240,14 +246,14 @@ const App: React.FC = () => {
     return () => { service.stop(); localRef.current = null; };
   }, [config, addLog]);
 
-  // Demo mode (?demo): a scripted scene, no robot and no Gemini (services/demo.ts)
+  // Demo mode (?demo): the face, awake, listening on the mic; no robot and no Gemini (services/demo.ts)
   useEffect(() => {
     if (!DEMO) return;
     return runDemo({
       setConnected: on => setConnState(on ? ConnectionState.CONNECTED : ConnectionState.DISCONNECTED),
-      setAudioLevel, setCaption, setHearing, showDisplay, setReminders: setReminderBanners,
+      setHearing,
     });
-  }, [showDisplay]);
+  }, []);
 
   // Background System Polling Loop (Slow, for critical battery alerts)
   useEffect(() => {

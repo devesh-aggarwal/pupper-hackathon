@@ -13,7 +13,7 @@ reacts out loud without anyone speaking first.
               gets what Pupper would otherwise only say.
   hearing_detected()  the calibrated detector (hearing/listener.py, run by the robot server
               as robot.hearing) heard an URGENT sound (siren, alarm, doorbell, bang, crash,
-              shout, knocking, a baby crying). The robot decides: Pupper's own motors, or one alert already showing,
+              knocking, a baby crying; not shouting). The robot decides: Pupper's own motors, or one alert already showing,
               and nothing happens; otherwise the screen turns red with what it was. Gemini is
               not told: Pupper shows sounds, it doesn't talk about them.
   sound_detected()  the fallback, when the robot has no calibrated detector: the browser
@@ -150,7 +150,6 @@ URGENT = {  # class -> (big words on the screen, the line under them)
     "doorbell": ("DOORBELL", "someone may be at the door"),
     "bang": ("LOUD BANG", "something dropped, slammed or fell"),
     "crash": ("CRASH", "something broke"),
-    "shout": ("SHOUTING", "someone is shouting"),
     "knock": ("KNOCKING", "someone may be at the door"),
     "baby": ("BABY CRYING", "a baby is crying"),
 }
@@ -237,9 +236,9 @@ async def show_text_tool(robot: Robot, text: str, detail: str = "", color: str =
 @tool(
     "sound_alerts",
     "Turn hearing alerts on or off. They are off until a person asks: only turn them on when the"
-    " person asks you, in so many words, to listen or watch out for loud sounds (bangs, falls, shouts, alarms, sirens, the doorbell, knocking, a baby crying), never"
+    " person asks you, in so many words, to listen or watch out for loud sounds (bangs, falls, alarms, sirens, the doorbell, knocking, a baby crying), never"
     " on your own, and never because the words 'sound' or 'alert' came up: 'no sound alerts right now' means leave them off; if unsure, ask first."
-    " When on, urgent sounds (siren, alarm, doorbell, bang, crash, shouting, knocking, a baby crying) turn the screen"
+    " When on, urgent sounds (siren, alarm, doorbell, bang, crash, knocking, a baby crying; not shouting) turn the screen"
     " red with what they were, and a corner of the screen shows what Pupper hears; you are not told"
     " about them. Sensitivity: low only reacts to very loud"
     " sounds, high to smaller ones. Default medium.",
