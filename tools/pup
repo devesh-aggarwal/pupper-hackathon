@@ -17,14 +17,14 @@
 #   ./pup kill <pattern>        kill processes on the Pi matching a pattern
 #
 # Where the Pupper is: ~/.config/pupper/ssh ("pi@host port", one line; tools/brain_on_mac.sh writes
-# it, e.g. "pi@4.tcp.us-cal-1.ngrok.io 18196"), else pi@pupper5.local. Env overrides: PUPPER_HOST,
+# it, e.g. "pi@100.88.25.110 22"), else pi@100.88.25.110 (Pupper on Tailscale). Env overrides: PUPPER_HOST,
 # PUPPER_PORT, PUPPER_KEY (default ~/.ssh/pupper_ed25519), PUPPER_PASSWORD (used only by `setup`),
 # PUPPER_TUNNEL_PORTS (link only: these ports on this machine are localhost on the Pi too).
 
 set -euo pipefail
 
 SAVED=$(cat "$HOME/.config/pupper/ssh" 2>/dev/null || true)
-HOST="${PUPPER_HOST:-$(echo "$SAVED" | awk '{print $1}')}"; HOST="${HOST:-pi@pupper5.local}"
+HOST="${PUPPER_HOST:-$(echo "$SAVED" | awk '{print $1}')}"; HOST="${HOST:-pi@100.88.25.110}"
 PORT="${PUPPER_PORT:-$(echo "$SAVED" | awk '{print $2}')}"; PORT="${PORT:-22}"
 KEY="${PUPPER_KEY:-$HOME/.ssh/pupper_ed25519}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

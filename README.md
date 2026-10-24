@@ -293,6 +293,7 @@ The Pupper must be logged into W&B (`wandb login`) with the account the runs are
 
 ```sh
 ssh pi@pupper5.local
+ssh pi@100.88.25.110          # from anywhere, over Tailscale (both on the tailnet)
 ```
 
 The laptop and the Pupper must be on the same network for `.local` (mDNS) to resolve. To skip the
@@ -699,13 +700,13 @@ The brain's heavy half (Gemma, whisper) runs on a Mac, the rest on the Pupper. O
   whisper.cpp (Metal)      :8178                       robot/server.py, gemma_brain.py, face, mic, speaker
 ```
 
-The Pupper can't reach the Mac by itself (other WiFi, ngrok), so the Mac links its servers to it:
+The Pupper can't reach the Mac's servers by itself, so the Mac links them to it over ssh (Tailscale):
 an ssh connection, kept up in the background, that makes the two ports `localhost` on the Pupper.
 
 **On the Mac**, `./run_pupper.sh` (`tools/brain_on_mac.sh`):
 
 1. Finds the Pupper over ssh with the address saved in `~/.config/pupper/ssh` (`pi@host port`).
-   When that stops working (a new ngrok address), it asks once for the ssh command you use and
+   By default that's Tailscale, `pi@100.88.25.110`. When it stops working, it asks once for the ssh command you use and
    saves it. Then it updates `~/pupper-hackathon` on the Pupper from the repo (`git pull`), so
    push your changes first.
 2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11435

@@ -2,7 +2,7 @@
 # Pupper's brain on this Mac, no cloud:   ./run_pupper.sh [volume 0-100]   (on the Mac; it runs this)
 #
 #   1. finds the Pupper over ssh (the address saved in ~/.config/pupper/ssh; asked for once when it
-#      changes, e.g. a new ngrok address) and updates its code from the repo (git pull)
+#      changes) and updates its code from the repo (git pull). By default, Tailscale: pi@100.88.25.110
 #   2. starts the brain's servers on this Mac, if they aren't up: Ollama with Gemma (port 11435) and
 #      whisper.cpp (speech to text, port 8178), for this Mac only
 #   3. starts the link: an ssh connection to the Pupper, kept up in the background, that makes
@@ -40,15 +40,15 @@ fi
 # --- 1. the Pupper
 reach() { "$PUP" sh true >/dev/null 2>&1; }
 if ! reach; then
-  [ -t 0 ] || die "can't reach the Pupper over ssh ($(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local))"
-  echo "Can't reach the Pupper at $(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local)."
-  read -rp "Paste the ssh command you use to reach it (e.g. ssh -p 18196 pi@4.tcp.us-cal-1.ngrok.io): " cmd
+  [ -t 0 ] || die "can't reach the Pupper over ssh ($(cat "$SAVED" 2>/dev/null || echo pi@100.88.25.110)). Is Tailscale up on both?"
+  echo "Can't reach the Pupper at $(cat "$SAVED" 2>/dev/null || echo pi@100.88.25.110). Is Tailscale up on both?"
+  read -rp "Or paste the ssh command you use to reach it (e.g. ssh pi@100.88.25.110): " cmd
   port=$(echo "$cmd" | grep -oE -- '-p *[0-9]+' | grep -oE '[0-9]+'); host=$(echo "$cmd" | grep -oE '[^ ]+@[^ ]+' | head -1)
   [ -n "$host" ] || die "no user@host in that"
   echo "$host ${port:-22}" > "$SAVED"
   reach || die "still can't reach $host (port ${port:-22}). Once per laptop: ./tools/pup setup"
 fi
-echo "Pupper: $(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local)"
+echo "Pupper: $(cat "$SAVED" 2>/dev/null || echo pi@100.88.25.110)"
 # The code comes from the repo: push from here, and the Pupper pulls it.
 "$PUP" sh "cd ~/pupper-hackathon && git pull -q --ff-only" \
   || echo "!! git pull on the Pupper failed (local changes there?); it runs the code it has"
