@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Which Gemma makes the best brain? Each model hears the same 17 commands, through the brain's real
+"""Which Gemma makes the best brain? Each model hears the same commands and conversations, through the brain's real
 prompt and tools (robot/gemma_brain.py), on the fake robot (nothing moves), and is scored on what
 it does.
 
@@ -29,8 +29,8 @@ from pathlib import Path
 
 ROBOT = Path(__file__).resolve().parent.parent / "robot"
 _TMP = Path(tempfile.mkdtemp(prefix="pupper_bench_"))
-os.environ.setdefault("PUPPER_MEMORY_FILE", str(_TMP / "memory.json"))  # never your real memory
-os.environ.setdefault("PUPPER_LOG_DIR", str(_TMP / "logs"))
+os.environ["PUPPER_MEMORY_FILE"] = str(_TMP / "memory.json")  # never your real memory, even with env overrides
+os.environ["PUPPER_LOG_DIR"] = str(_TMP / "logs")
 sys.path.insert(0, str(ROBOT))
 import gemma_brain as gb  # noqa: E402
 
@@ -75,20 +75,43 @@ CASES = [
     ("Curve to the left in a half circle.", lambda c, s: called(c, "arc", direction="left", angle=num(180)), "arc stand_up robot_status", 2),
     ("Hi Pupper, how are you today?", lambda c, s: not any(n in MOTION for n, _ in c) and len(s) > 5, "robot_status recall", 1),
     ("Run forward at nine metres per second.", lambda c, s: "1.5" in s or "too fast" in s.lower(), "move stand_up robot_status", 3),
+    ("Don't move. Tell me about yourself.", lambda c, s: not any(n in MOTION for n, _ in c) and len(s) > 5,
+     "robot_status recall", 1),
+    ("Can you pick up my mug?", lambda c, s: not any(n in MOTION for n, _ in c) and len(s) > 5,
+     "look recall robot_status", 2),
+    ("Don't turn on sound alerts.", lambda c, s: not called(c, "sound_alerts", enabled=True)
+     and not any(n in MOTION for n, _ in c) and len(s) > 3, "sound_alerts", 1),
+    (["Sit down.", "Give me your left paw.", "Other paw."],
+     lambda c, s: called(c, "play_trick", name="sit_stay_shake")
+     and [a.get("action") for n, a in c if n == "interactive_action"] == ["shake_left", "shake_right"],
+     "play_trick interactive_action robot_status", 5),
+    (["Remember that I prefer tea.", "What drink do I prefer?"],
+     lambda c, s: called(c, "remember", fact=has_text("tea")) and "tea" in s.lower()
+     and not any(n in MOTION for n, _ in c), "remember recall", 3),
+    (["Follow me.", "Stop following me."],
+     lambda c, s: [a.get("enabled") for n, a in c if n == "follow"] == [True, False],
+     "follow robot_status", 3),
 ]
 JUNK = ("<", "```", "thought", "{", "tool_call", "|>")
 
 
-async def one(url: str, model: str, text: str, right, allowed: str, most: int, verbose: bool) -> dict:
+async def one(url: str, model: str, text: str | list[str], right, allowed: str, most: int, verbose: bool) -> dict:
     backend = gb.DeskBackend()
     with contextlib.redirect_stdout(io.StringIO()):  # the fake robot's start-up lines
         prompt, decls = backend.setup()
-    calls, said, replies = [], [], []
+    import hackathon_memory as memory
+    saved_memory = memory.MEMORY_FILE
+    memory.MEMORY_FILE = _TMP / f"case-{time.time_ns()}.json"
+    prompt = await backend.refresh_prompt()
+    calls, accepted, said, replies = [], [], [], []
     run = backend.call
 
     async def recorded(name, args):
         calls.append((name, args))
-        return await run(name, args)
+        result = await run(name, args)
+        if result.get("success"):
+            accepted.append((name, args))
+        return result
 
     backend.call, backend.after = recorded, lambda: None
     llm = gb.Ollama(url, model)
@@ -102,16 +125,23 @@ async def one(url: str, model: str, text: str, right, allowed: str, most: int, v
 
     llm.chat = timed
     brain = gb.Brain(llm, prompt, decls, backend, said.append, "auto", log=lambda line: None)
-    await brain.turn(text)
-    backend.rig.close()
+    try:
+        for turn in ([text] if isinstance(text, str) else text):
+            await brain.turn(turn)
+    finally:
+        backend.rig.close()
+        memory.MEMORY_FILE = saved_memory
     speech = " ".join(said)
-    ok = bool(right(calls, speech))
+    # A correctly named but refused call did not accomplish the task. Keep all attempts
+    # for the extra-action check, but score requested actions only when accepted.
+    ok = bool(right(accepted, speech))
     res = {"ok": ok, "clean": ok and len(calls) <= most and all(n in allowed.split() for n, _ in calls),
            "junk": not speech or any(j in speech for j in JUNK), "reply_s": replies[0] if replies else float("nan"),
            "mode": brain.mode}
     if verbose:
         mark = "clean" if res["clean"] else "right" if ok else "WRONG"
-        print(f"  {mark} {res['reply_s']:5.1f} s  {text:47} {calls} {speech[:90]!r}")
+        label = text if isinstance(text, str) else " / ".join(text)
+        print(f"  {mark} {res['reply_s']:5.1f} s  {label:47} {calls} accepted={len(accepted)}/{len(calls)} {speech[:90]!r}")
     return res
 
 

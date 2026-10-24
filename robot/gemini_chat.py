@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -75,10 +76,17 @@ class DeskBackend:
         self.seen_event = self.alerts.EVENTS.last_id
         return evs
 
+    async def refresh_prompt(self) -> str:
+        import hackathon_memory
+        return prompt_text() + "\n\n" + hackathon_memory.memory_prompt()
+
+    async def begin_batch(self) -> int:
+        return self.rig.ts.outcome_id
+
     async def call(self, name: str, args: dict) -> dict:
         res = await self.registry.call(self.rig.ts, name, args)
         await self.rig.settle()  # fake time: every queued job runs to the end now
-        return res.as_dict()
+        return {**res.as_dict(), "robot_state": self.rig.ts.status()}
 
     def after(self) -> None:
         """Print what the robot did: this happens later, after Gemini has its reply."""
@@ -140,11 +148,44 @@ class RobotBackend:
         self.seen_event = res["last"]
         return res["events"]
 
+    async def refresh_prompt(self) -> str:
+        return (await asyncio.to_thread(self._get, "/tools"))["prompt"]
+
+    async def begin_batch(self) -> int:
+        state = await asyncio.to_thread(self._get, "/queue/status")
+        return max((o["id"] for o in state.get("outcomes", [])), default=0)
+
     async def call(self, name: str, args: dict) -> dict:
         req = urllib.request.Request(f"{self.url}/tools/{name}", data=json.dumps(args).encode(),
                                      headers={"content-type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read())
+
+        def request():
+            with urllib.request.urlopen(req, timeout=30) as r:
+                result = json.loads(r.read())
+            try:
+                result["robot_state"] = self._get("/queue/status")
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                # The action may already have run. Never retry it because observation failed.
+                result["robot_state"] = {"unavailable": str(e)}
+            return result
+
+        # A slow tool must not block voice stop, event polling or the face heartbeat.
+        return await asyncio.to_thread(request)
+
+    async def finish_batch(self, timeout: float = 30.0) -> dict:
+        """Observe queued work to completion, without blocking stop or waiting forever.
+
+        Long searches may still be running at the deadline. Report that honestly; never
+        retry or cancel a physical action just because an observation timed out.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            state = await asyncio.to_thread(self._get, "/queue/status")
+            if not state.get("running") and not state.get("queued"):
+                return state
+            if time.monotonic() >= deadline:
+                return state
+            await asyncio.sleep(0.2)
 
 
 # ============================================================ the loop

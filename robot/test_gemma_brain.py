@@ -105,8 +105,8 @@ class Rig:
         self.brain = gb.Brain(gb.Ollama(self.ollama.url, "gemma4:e2b-it-qat"), self.prompt, self.decls,
                               self.backend, self.said.append, mode, log=self.lines.append, **brain)
 
-    def turn(self, text: str, image: bytes | None = None) -> None:
-        self.loop.run_until_complete(self.brain.turn(text, image))
+    def turn(self, text: str, image: bytes | None = None, source: str = "person") -> None:
+        self.loop.run_until_complete(self.brain.turn(text, image, source=source))
 
     def close(self, ollama: bool = True) -> None:
         if ollama:
@@ -186,6 +186,221 @@ def translation_tests() -> None:
 
 def loop_tests() -> None:
     print("Brain: the loop, with Gemma played by a fake Ollama")
+    rig = Rig([{"content": '{"say":"","calls":[{"name":"stand_up","args":{}}]}'},
+               {"content": '{"say":"Standing.","calls":[]}'}])
+    rig.turn("stand up")
+    check("a structured envelope in native mode is executed and never spoken as JSON",
+          [r[0] for r in rig.results] == ["stand_up"] and rig.said == ["Standing."], (rig.results, rig.said))
+    rig.close()
+
+    for raw in ("<think>private reasoning</think>Hello.", "<thinking>private reasoning</thinking>Hello."):
+        check("thinking tags never leak private reasoning into speech", gb.drop_thought(raw) == "Hello.", gb.drop_thought(raw))
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward")]}, {"content": "The search has finished."}])
+    rig.turn("[search result] found your cup", source="robot")
+    check("a robot event cannot authorize new physical actions, even if the model tries", not rig.results, rig.results)
+    rig.close()
+
+    rig = Rig([])
+    rig.turn("Pupper, stop!")
+    check("typed stop also bypasses the model entirely",
+          [r[0] for r in rig.results] == ["stop"] and not rig.ollama.requests and rig.said == ["Stopped."], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward", speed=9)]},
+               {"tool_calls": [call("move", direction="forward", speed=9)]}, {"content": "That was refused."}])
+    rig.turn("walk too fast")
+    check("the harness does not retry an identical refused call in the same turn",
+          len(rig.results) == 1 and "already refused" in rig.ollama.requests[-1]["messages"][-1]["content"], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward")] * (gb.MAX_CALLS + 1)}])
+    rig.turn("move")
+    check("an oversized model plan cannot flood the robot queue",
+          not rig.results and any("too many actions" in s for s in rig.said) and not rig.brain.history, rig.results)
+    rig.close()
+
+    rig = Rig([{"content": "bad json"}, {"content": '{"say":"Hello.","calls":[]}'}], mode="json")
+    rig.turn("hello")
+    check("a malformed model response gets one correction opportunity, without phantom actions",
+          rig.said == ["Hello."] and not rig.results and len(rig.ollama.requests) == 2, (rig.said, rig.results))
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("remember", fact="I like reliable robots")]}, {"content": "Remembered."}])
+    rig.turn("remember I like reliable robots")
+    check("new memory is in the very next model system context",
+          "I like reliable robots" in rig.ollama.requests[-1]["messages"][0]["content"])
+    rig.close()
+
+    rig = Rig([])
+    ran = []
+
+    async def queue_failure():
+        async def fail():
+            return tt.robot_api.Result(False, "controller refused")
+
+        async def dependent():
+            ran.append(True)
+            return tt.robot_api.Result(True, "should not run")
+
+        robot = rig.backend.rig.ts
+        await robot.queue("prerequisite", fail, 1, then=tt.robot_api.UNCHANGED)
+        await robot.queue("dependent", dependent, 1, then=tt.robot_api.UNCHANGED)
+        await rig.backend.rig.settle()
+        return robot.status()
+
+    state = rig.loop.run_until_complete(queue_failure())
+    check("a job failure clears dependent queued actions and exposes its real outcome",
+          not ran and not state["queued"] and not state["outcomes"][-1]["success"]
+          and "controller refused" in state["outcomes"][-1]["message"], state)
+    rig.close()
+
+    rig = Rig([], keep=4)
+    rig.brain.history = [{"role": "user", "content": "actual request"},
+                         {"role": "assistant", "content": "call"},
+                         {"role": "user", "content": "[tool results, from the robot] result"},
+                         {"role": "assistant", "content": "answer"},
+                         {"role": "user", "content": "next actual request"},
+                         {"role": "assistant", "content": "next answer"}]
+    rig.brain.turn_starts = [0, 4]
+    rig.brain._trim()
+    check("history pruning retains complete turns, never orphaned synthetic tool results",
+          rig.brain.history[0]["content"] == "next actual request" and rig.brain.turn_starts == [0], rig.brain.history)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward", speed=9), call("turn", direction="left")]},
+               {"content": "That move was refused; I did not turn."}])
+    rig.turn("walk and turn")
+    check("a refused prerequisite prevents the rest of the batch from executing",
+          [r[0] for r in rig.results] == ["move"], rig.results)
+    messages = rig.ollama.requests[-1]["messages"]
+    check("the model gets a result for the skipped call so it can reassess",
+          "not run" in messages[-1]["content"] and messages[-1]["tool_name"] == "turn", messages[-1])
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("stand_up"), call("move", direction="forward")]}, {"content": "Unavailable."}])
+    del rig.brain.decls["stand_up"]
+    rig.turn("stand and move")
+    check("disabled tools cannot run, and their dependent calls are skipped", rig.results == [], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [{"function": {"name": "move", "arguments": "broken json"}}]},
+               {"content": "I could not read that command."}])
+    rig.turn("move")
+    check("malformed arguments never turn into a default move", rig.results == [], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward", duration="NaN")]},
+               {"content": "The duration must be finite."}])
+    rig.turn("move")
+    check("non-finite numeric arguments are refused by the server",
+          not rig.results[0][2]["success"] and "finite" in rig.results[0][2]["message"], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward")]}])
+    entered, release = threading.Event(), threading.Event()
+    ask = rig.brain._ask
+
+    def delayed():
+        entered.set()
+        release.wait(5)
+        return ask()
+
+    rig.brain._ask = delayed
+
+    async def interrupt():
+        task = asyncio.create_task(rig.brain.turn("walk forward"))
+        await asyncio.to_thread(entered.wait, 5)
+        await rig.brain.stop()
+        release.set()
+        await task
+
+    rig.loop.run_until_complete(interrupt())
+    check("stop discards a model decision that arrives late, with no motion or stale speech",
+          [r[0] for r in rig.results] == ["stop"] and not rig.said and not rig.brain.history,
+          (rig.results, rig.said))
+    rig.close()
+
+    class SlowToolHandler(BaseHTTPRequestHandler):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            payload = json.dumps({"running": self.entered.is_set() and not self.release.is_set(),
+                                  "queued": 0, "outcomes": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self):
+            if self.path.endswith("/move"):
+                self.entered.set()
+                self.release.wait(3)
+            payload = b'{"success":true,"message":"accepted"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowToolHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    async def concurrent_stop():
+        backend = gb.RobotBackend(f"http://127.0.0.1:{server.server_port}")
+        move = asyncio.create_task(backend.call("move", {}))
+        try:
+            entered = await asyncio.to_thread(SlowToolHandler.entered.wait, 2)
+            result = await asyncio.wait_for(backend.call("stop", {}), 1)
+            check("a pending HTTP tool request does not block stop on the event loop",
+                  entered and result["success"] and not move.done())
+            pending = await backend.finish_batch(timeout=0)
+            check("a batch observation timeout reports pending work, never fabricated completion", pending["running"])
+        finally:
+            SlowToolHandler.release.set()
+            await move
+
+    asyncio.run(concurrent_stop())
+    server.shutdown()
+    server.server_close()
+
+    rig = Rig([{"content": "Hello."}])
+    rig.brain.history = [{"role": "user", "content": "old request " + "x" * 100000},
+                         {"role": "assistant", "content": "old answer"}]
+    rig.brain.turn_starts = [0]
+    rig.turn("hello")
+    check("large old turns are removed by size before sending a new request",
+          rig.said == ["Hello."] and not any("old request" in m.get("content", "")
+          for m in rig.ollama.requests[0]["messages"]), rig.said)
+    rig.close()
+
+    rig = Rig([])
+    rig.turn("x" * 100000)
+    check("an oversized current turn is rejected before any model request or action",
+          not rig.results and not rig.ollama.requests and bool(rig.said), rig.results)
+    rig.close()
+
+    sys.path.insert(0, str(HERE.parent / "tools"))
+    import brain_bench
+    ollama = FakeOllama([{"tool_calls": [call("move", direction="forward", speed=9)]},
+                         {"content": "That speed is too fast."}])
+    result = asyncio.run(brain_bench.one(
+        ollama.url, "fake", "walk forward", lambda calls, speech: brain_bench.called(calls, "move"),
+        "move", 1, False))
+    check("the benchmark does not count a refused action as task success", not result["ok"], result)
+    ollama.close()
+
+    for raw in ('not json', '[]', '{"say":"done","calls":[null]}'):
+        rig = Rig([{"content": raw}], mode="json")
+        rig.turn("stand up")
+        check("malformed structured replies fail clearly without speaking model protocol or acting",
+              rig.results == [] and rig.said == ["Sorry, my brain isn't answering right now."],
+              (raw, rig.results, rig.said))
+        rig.close()
+
     rig = Rig([{"content": "", "tool_calls": [call("move", direction="forward", duration="2")]},
                {"content": "I walked forward for two seconds."}])
     rig.turn("walk forward for 2 seconds")
@@ -241,7 +456,8 @@ def loop_tests() -> None:
     rig.turn("run forward at 9 metres a second")
     reply = json.loads(rig.ollama.requests[1]["messages"][-1]["content"])
     check("a refusal goes back to Gemma with the limit in it", reply["success"] is False and "1.5" in reply["message"], reply)
-    check("words said with a call are said first, then the answer", rig.said == ["Zoom!", "That's too fast for me: 1.5 metres a second at most."], rig.said)
+    check("a refused action's optimistic preamble is not spoken; only the corrected answer is",
+          rig.said == ["That's too fast for me: 1.5 metres a second at most."], rig.said)
     rig.close()
 
     rig = Rig([{"content": '```json\n{"name": "stand_up", "arguments": {}}\n```'}, {"content": "I'm up."}])

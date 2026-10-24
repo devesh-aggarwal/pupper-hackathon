@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 import sys
 import types
 from dataclasses import dataclass
@@ -161,7 +162,9 @@ async def call(robot: Robot, name: str, args: dict) -> Result:
     t = TOOLS.get(name)
     if t is None:
         return Result(False, f"unknown tool {name}; the tools are {sorted(TOOLS)}")
-    args = dict(args or {})
+    if not isinstance(args, dict):
+        return Result(False, f"{name}: arguments must be an object")
+    args = dict(args)
     extra = sorted(set(args) - set(t.params))
     if extra:
         return Result(False, f"{name} has no parameter {extra}; it takes {sorted(t.params)}")
@@ -173,6 +176,8 @@ async def call(robot: Robot, name: str, args: dict) -> Result:
         v = args[pname]
         if isinstance(v, bool) and p.type != "boolean" or not isinstance(v, _TYPES[p.type]):
             return Result(False, f"{name}: {pname} must be a {p.type}, not {v!r}")
+        if isinstance(v, float) and not math.isfinite(v):
+            return Result(False, f"{name}: {pname} must be finite, not {v!r}")
         enum = _resolve(p.enum, robot)
         if enum is not None and not enum:
             return Result(False, f"{name}: nothing is installed for {pname} yet, so it can't be used")

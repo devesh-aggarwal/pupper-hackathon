@@ -4,9 +4,9 @@
     ./run_local.sh                    (builds the web app if needed, then runs this)
     python3 robot/laptop_server.py    (if web/dist is already built)
 
-The real server.py, your lab/ tools and prompt, the reminders and the web app at
-http://localhost:8000, talking to the real Gemini Live from your browser (your
-laptop's mic, speaker and camera). Only ROS is swapped for the fake robot from
+The real server.py, your lab/ tools and prompt, reminders and the web app at
+http://localhost:8000. This starts no language model or voice process.
+Only ROS is swapped for the fake robot from
 test_tools.py, so every motion is logged here instead of moving the legs:
 "[fake robot] legs: gemini_walk took over", "[fake robot] walking vx=0.4 ...".
 
@@ -75,7 +75,8 @@ def main() -> None:
         sys.exit("web/dist is missing: build the web app first (./run_local.sh does it)")
     port = int(os.environ.get("PORT", "8000"))
     print(f"\nGemini Pupper on your laptop, with a fake robot (nothing moves).\n"
-          f"  Open http://localhost:{port} , Settings -> paste your Gemini API key -> WAKE PUPPER\n"
+          f"  Open http://localhost:{port} for the face/debug UI (no key or WAKE button).\n"
+          f"  This starts no brain. For a separate fake-robot text session: python3 robot/gemma_brain.py\n"
           f"  Reminders file: {os.environ['PUPPER_REMINDERS_FILE']}\n"
           f"  Ctrl+C to stop.\n", flush=True)
     # No request log: the web app asks for reminders every 5 s and for status often; the tool

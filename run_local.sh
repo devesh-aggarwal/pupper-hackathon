@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run Gemini Pupper on your laptop, no Pupper needed:  ./run_local.sh
 # The real robot server, lab/ tools and prompt, reminders and web app, with a fake robot
-# (every motion is logged, nothing moves). Open http://localhost:8000, paste your Gemini
-# key in Settings, press WAKE PUPPER, and talk through your laptop's mic.
+# (every motion is logged, nothing moves). Open http://localhost:8000 for the face/debug UI.
+# This starts no model or voice process; use robot/gemma_brain.py for a separate text session.
 #   PORT=8080 ./run_local.sh     another port
 #   ./run_local.sh --build       rebuild the web app even if it looks up to date
 set -euo pipefail
@@ -29,8 +29,7 @@ stale=$( [ -f web/dist/index.html ] && find web -path web/node_modules -prune -o
 if [ -n "$stale" ] || [ "${1:-}" = "--build" ]; then
   command -v npm >/dev/null || { echo "Needs Node.js (npm) to build the web app"; exit 1; }
   echo "building the web app (web/dist)..."
-  (cd web && { [ -d node_modules ] || npm ci --no-audit --no-fund --loglevel=error; } && npm run build --silent \
-     2>&1 | grep -vE "chunks are larger|dynamic import|manualChunks|chunkSizeWarningLimit|^$" || true)
+  (cd web && { [ -d node_modules ] || npm ci --no-audit --no-fund --loglevel=error; } && npm run build --silent)
   [ -f web/dist/index.html ] || { echo "web build failed"; exit 1; }
 fi
 

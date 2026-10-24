@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Pupper's brain on this Mac, no cloud:   ./run_pupper.sh [volume 0-100]   (on the Mac; it runs this)
 #
-#   1. finds the Pupper over ssh (the address saved in ~/.config/pupper/ssh; asked for once when it
-#      changes, e.g. a new ngrok address) and updates its code from the repo (git pull)
+#   1. finds the Pupper over ssh and prints the checkout it will run (updates are explicit)
 #   2. starts the brain's servers on this Mac, if they aren't up: Ollama with Gemma (port 11435) and
 #      whisper.cpp (speech to text, port 8178), for this Mac only
 #   3. starts the link: an ssh connection to the Pupper, kept up in the background, that makes
@@ -17,7 +16,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 PUP="$HERE/tools/pup"
-WANT=gemma4:26b    # the best brain this Mac can run: a mixture of experts, 4B active per token
+WANT=${PUPPER_GEMMA:-gemma4:26b}
 WHISPER_MODEL=${PUPPER_WHISPER_MODEL:-large-v3-turbo-q5_0}  # far better than base.en in a noisy room; fast on the GPU
 OLLAMA_PORT=11435  # not 11434: the Ollama app may hold that
 WHISPER_PORT=8178
@@ -46,9 +45,9 @@ if ! reach; then
   reach || die "still can't reach $host (port ${port:-22}). Once per laptop: ./tools/pup setup"
 fi
 echo "Pupper: $(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local)"
-# The code comes from the repo: push from here, and the Pupper pulls it.
-"$PUP" sh "cd ~/pupper-hackathon && git pull -q --ff-only" \
-  || echo "!! git pull on the Pupper failed (local changes there?); it runs the code it has"
+# Do not silently update or change the teammate's chosen branch during startup.
+"$PUP" sh 'cd ~/pupper-hackathon && git status --short --branch && git log -1 --oneline' \
+  || die "couldn't inspect ~/pupper-hackathon on the Pupper"
 
 # --- 2. the brain's servers (they outlive this script: the Pupper may start on its own later)
 export OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT  # this Mac only: the link carries it to the Pupper
@@ -63,16 +62,19 @@ if ! ollama_up; then
   ollama_up || die "Ollama didn't start (log $LOG/ollama.log)"
   nohup caffeinate -i -w "$(cat "$CACHE/ollama.pid")" >/dev/null 2>&1 &  # no sleeping while it's the brain
 fi
+MODEL=$WANT
 if ! ollama show "$WANT" >/dev/null 2>&1; then
   HAVE=$(cd "$HERE" && python3 -c 'import sys; sys.path.insert(0, "robot"); import gemma_brain as g; print(g.pick_model(sys.argv[1:]) or "")' \
          $(ollama list 2>/dev/null | awk 'NR > 1 {print $1}'))
-  if [ -n "$HAVE" ]; then
+  if [ -n "$HAVE" ] && [ -z "${PUPPER_GEMMA:-}" ]; then
     echo "Gemma: $WANT isn't pulled yet, so $HAVE for now (the better brain: ollama pull $WANT, about 17 GB)"
+    MODEL=$HAVE
   else
     echo "pulling $WANT (once, about 17 GB)..."
     ollama pull "$WANT" || die "couldn't pull $WANT. Gemma 4 needs a recent Ollama: brew upgrade ollama, or update the app"
   fi
 fi
+echo "Gemma: $MODEL (the brain and eyes use this same model)"
 
 whisper_up() { curl -sf -m 2 -o /dev/null "http://127.0.0.1:$WHISPER_PORT/"; }
 if whisper_up && [ "$(cat "$CACHE/whisper.model" 2>/dev/null)" != "$WHISPER_MODEL" ]; then  # an older model: swap it
@@ -120,7 +122,10 @@ echo "       OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT ollama ps (the model on the GPU)
 
 # --- 4. the Pupper
 echo
-"$PUP" tty "cd ~/pupper-hackathon && ./run_pupper.sh $*"
+printf -v model_env '%q' "$MODEL"
+run_args=""
+if [ "$#" -gt 0 ]; then printf -v run_args ' %q' "$@"; fi
+"$PUP" tty "cd ~/pupper-hackathon && PUPPER_GEMMA=$model_env ./run_pupper.sh$run_args"
 "$PUP" sh "~/pupper-hackathon/robot/stop.sh" >/dev/null 2>&1 \
   || echo "!! couldn't reach the Pupper to stop it: use the e-stop, then ./tools/pup sh pupper-hackathon/robot/stop.sh"
 echo "The brain and the link keep running: ./run_pupper.sh on the Pupper works too. To end them: tools/brain_on_mac.sh stop"
