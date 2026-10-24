@@ -694,7 +694,8 @@ an ssh connection, kept up in the background, that makes the two ports `localhos
 
 1. Finds the Pupper over ssh with the address saved in `~/.config/pupper/ssh` (`pi@host port`).
    When that stops working (a new ngrok address), it asks once for the ssh command you use and
-   saves it. Then it copies this checkout to `~/pupper-hackathon` on the Pupper (`tools/pup sync`).
+   saves it. Then it updates `~/pupper-hackathon` on the Pupper from the repo (`git pull`), so
+   push your changes first.
 2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11435
    (16k context, Gemma kept loaded; an Ollama app you already run is left alone, they share the
    models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `large-v3-turbo` model,

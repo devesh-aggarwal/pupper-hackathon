@@ -2,7 +2,7 @@
 # Pupper's brain on this Mac, no cloud:   ./run_pupper.sh [volume 0-100]   (on the Mac; it runs this)
 #
 #   1. finds the Pupper over ssh (the address saved in ~/.config/pupper/ssh; asked for once when it
-#      changes, e.g. a new ngrok address) and copies this checkout to it (tools/pup sync)
+#      changes, e.g. a new ngrok address) and updates its code from the repo (git pull)
 #   2. starts the brain's servers on this Mac, if they aren't up: Ollama with Gemma (port 11435) and
 #      whisper.cpp (speech to text, port 8178), for this Mac only
 #   3. starts the link: an ssh connection to the Pupper, kept up in the background, that makes
@@ -46,7 +46,9 @@ if ! reach; then
   reach || die "still can't reach $host (port ${port:-22}). Once per laptop: ./tools/pup setup"
 fi
 echo "Pupper: $(cat "$SAVED" 2>/dev/null || echo pi@pupper5.local)"
-"$PUP" sync >/dev/null || die "copying this checkout to the Pupper failed (./tools/pup sync)"
+# The code comes from the repo: push from here, and the Pupper pulls it.
+"$PUP" sh "cd ~/pupper-hackathon && git pull -q --ff-only" \
+  || echo "!! git pull on the Pupper failed (local changes there?); it runs the code it has"
 
 # --- 2. the brain's servers (they outlive this script: the Pupper may start on its own later)
 export OLLAMA_HOST=127.0.0.1:$OLLAMA_PORT  # this Mac only: the link carries it to the Pupper
