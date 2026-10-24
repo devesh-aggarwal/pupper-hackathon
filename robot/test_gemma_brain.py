@@ -178,6 +178,10 @@ def translation_tests() -> None:
     check("pick_model: gemma4:latest counts as gemma4", gb.pick_model(["gemma4:latest", "gemma4:e2b"]) == "gemma4:latest")
     check("pick_model: no Gemma, no model", gb.pick_model(["llama3:8b"]) is None)
     check("speech is cleaned of markdown", gb.clean_speech("**Sure!** I'll  _walk_\n now.") == "Sure! I'll walk now.")
+    for raw, want in (("thought\n<channel|>", ""), ("thought\nI found your cup. It is on the table.", ""),
+                      ("<|channel>thought\nThe user wants...<channel|>I am looking for your cup.", "I am looking for your cup."),
+                      ("I thought about it: yes.", "I thought about it: yes."), ("Sure, I will sit.", "Sure, I will sit.")):
+        check(f"Gemma 4's leaked thought {raw[:30]!r} is said as {want!r}", gb.drop_thought(raw) == want, gb.drop_thought(raw))
 
 
 def loop_tests() -> None:
@@ -189,7 +193,7 @@ def loop_tests() -> None:
     check("Gemma gets every tool, the prompt and the voice rules", len(first["tools"]) == len(rig.decls)
           and first["messages"][0]["role"] == "system" and gb.VOICE_RULES in first["messages"][0]["content"]
           and rig.prompt[:200] in first["messages"][0]["content"])
-    check(f"with a context of {gb.NUM_CTX} tokens (Ollama's default would cut the tools off), not thinking, kept loaded",
+    check(f"with a context of {gb.NUM_CTX} tokens (Ollama's default would cut the tools off), not thinking (it's slow), kept loaded",
           first["options"]["num_ctx"] == gb.NUM_CTX and first["think"] is False and first["keep_alive"] == -1, first["options"])
     ran = rig.results[0] if rig.results else None
     check("Gemma's call ran on the robot, with '2' read as 2.0", ran is not None and ran[0] == "move"
@@ -202,6 +206,13 @@ def loop_tests() -> None:
     check("Pupper says Gemma's answer", rig.said == ["I walked forward for two seconds."], rig.said)
     twists = [m for _, topic, m in rig.backend.rig.robot.published if topic == "/llm_cmd_vel"]
     check("...and the fake robot really walked forward", any(m.linear.x > 0 for m in twists), f"{len(twists)} speed commands")
+    rig.close()
+
+    rig = Rig([{"content": "", "tool_calls": [call("find", what="cup")]},
+               {"content": "thought\nI found your cup. It is on the table."}])
+    rig.turn("where is my cup? find it")
+    check("a thought that leaks after a tool result is never said (here it claimed a find that never happened)",
+          rig.said == [] and rig.brain.history[-1]["content"] == "", (rig.said, rig.brain.history[-1]))
     rig.close()
 
     rig = Rig([{"content": "Zoom!", "tool_calls": [call("move", direction="forward", speed=9)]},

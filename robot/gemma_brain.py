@@ -173,6 +173,17 @@ def json_mode_prompt(decls: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def drop_thought(text: str) -> str:
+    """Gemma 4's thought channel, should any leak into a reply: "thought ... <channel|>answer" keeps
+    the answer; a thought that never closes is all thought, and none of it is for the person."""
+    text = (text or "").strip()
+    if "<channel|>" in text:
+        text = text.split("<channel|>")[-1]
+    elif re.match(r"(<\|channel>)?thought\b", text):
+        return ""
+    return re.sub(r"<\|?[a-z_]+\|?>", "", text).strip()
+
+
 def clean_speech(text: str) -> str:
     """What the synthesizer should read: no markdown marks, one line."""
     return " ".join(re.sub(r"[*_#`>]+", "", text or "").split())
@@ -186,7 +197,10 @@ class OllamaError(RuntimeError):
 class Ollama:
     def __init__(self, url: str, model: str, num_ctx: int = NUM_CTX, timeout: float = 180.0):
         self.url, self.model, self.num_ctx, self.timeout = url.rstrip("/"), model, num_ctx, timeout
-        self.think: bool | None = False  # Gemma 4 thinks first unless told not to: slow. None: don't say
+        # Thinking off: on, Gemma 4 takes 3.4 s to reply instead of 0.5 s, for the same tool choices
+        # (tools/brain_bench.py). Off, its thought sometimes leaks into a reply after a tool result;
+        # drop_thought() keeps that from being said. None: a model that can't be told (Ollama says so).
+        self.think: bool | None = False
         self.last: dict = {}  # the last reply, for its timings
 
     def _req(self, path: str, body: dict | None = None, timeout: float | None = None) -> dict:
@@ -297,12 +311,12 @@ class Brain:
                     self.mode = "json"
                     return self._ask()
                 raise
-            content = (m.get("content") or "").strip()
+            content = drop_thought(m.get("content") or "")
             calls, native = native_calls(m), True
             if not calls:
                 content, calls = calls_in_text(content, self.decls)
                 native = False
-            reply = {"role": "assistant", "content": m.get("content") or ""}
+            reply = {"role": "assistant", "content": drop_thought(m.get("content") or "")}
             if m.get("tool_calls"):
                 reply["tool_calls"] = m["tool_calls"]
             self.history.append(reply)

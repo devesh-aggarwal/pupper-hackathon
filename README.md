@@ -170,7 +170,7 @@ Debugging: `tail -f /tmp/gemini-pupper/server.log` (your `lab/` code) and
 
 ```bash
 python3 -m pip install --user google-genai pyyaml
-python3 lab/test.py            # all 559 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 232, then the local brain's 69
+python3 lab/test.py            # all 565 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 232, then the local brain's 75
 python3 lab/test.py todo9      # one TODO
 python3 lab/test.py reminders  # the reminders (robot/test_reminders.py)
 python3 lab/test.py hackathon  # memory, screen, sound, vision, eyes, find (explore), guard, learning (or: hackathon explore)
@@ -733,10 +733,21 @@ python3 tools/brain_bench.py gemma4:26b gemma4:26b-a4b-it-qat gemma4:26b-mlx \
 The candidates: Ollama's own build (`gemma4:26b`, with Ollama's Gemma 4 tool calling), Google's
 quantization-aware 4-bit (`-it-qat`, usually the most accurate at 4 bits), the MLX build
 (`-mlx`, Apple's engine) and Unsloth's dynamic 4-bit GGUF (tool calling through Ollama is
-reportedly unreliable for Hugging Face GGUFs). Measured so far, on the M4 Pro: `gemma3:4b`, 14/17
-right, 11/17 clean (nothing extra that moves the robot), 0.7 s to reply, 8.5 s for the first turn
-(it reads the whole prompt once); it has no tool calling, so it answers in JSON. Run the bench on
-the 26B builds once they are pulled, and set the winner with `PUPPER_GEMMA`.
+reportedly unreliable for Hugging Face GGUFs). Measured on the M4 Pro (48 GB):
+
+| model | right | clean | junk | reply | first turn | tool calls |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gemma4:26b` | 16/17 | 16/17 | 0 | 0.5 s | 11 s | native |
+| `gemma3:4b` | 14/17 | 13/17 | 0 | 0.7 s | 9 s | none: JSON replies |
+
+"Clean" is right with nothing extra that moves the robot; "first turn" is Gemma reading the whole
+prompt and tools once (later turns in a conversation reuse it). `gemma4:26b` misses only "walk in a
+square": it treats it as a routine it hasn't learned and offers a trick instead, which the prompt
+could steer. `gemma3:4b` skipped `remember`, turned "give me your paw" into a sidestep and called
+`follow` four times. Thinking stays off: on, `gemma4:26b` made the same choices but took 3.4 s to
+reply. Off, its thought sometimes leaks into a reply after a tool result ("thought ... I found your
+cup", before any search had run); the brain drops it, so it is never said. The other 26B builds
+(QAT, MLX, Unsloth) aren't measured yet.
 
 Things to know:
 
