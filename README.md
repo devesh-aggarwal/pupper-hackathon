@@ -701,7 +701,10 @@ an ssh connection, kept up in the background, that makes the two ports `localhos
    models) and whisper.cpp's server on the GPU (installed with Homebrew, with its `large-v3-turbo` model,
    the first time). Both listen on the Mac only.
 3. Starts the link and checks the Pupper sees both servers through it.
-4. Runs `./run_pupper.sh` on the Pupper (below).
+4. Starts the eyes on the Mac (`vision/eyes.py`, in `~/.cache/pupper/venv`): depth, the detector
+   and Gemma on the Pupper's camera at 5 frames a second, the rate the obstacle rule is designed
+   for. The Pupper's own eyes manage about 1 a second and stand down while these post.
+5. Runs `./run_pupper.sh` on the Pupper (below).
 
 Ctrl+C stops the robot. The servers and the link keep running (until the Mac sleeps or restarts),
 so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_mac.sh stop` ends them.
@@ -710,7 +713,9 @@ so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_m
 (`~/.cache/pupper/silero_vad.onnx`, from `robot/setup_voice.sh`): by loudness alone, a noisy room
 never sounded quiet and whisper got 15 s of noise at a time. Each utterance is at most 8 s.
 whisper is `large-v3-turbo` (about 0.5 s a sentence on an M4 Pro), told Pupper's own words
-("stand up", "push-up") as a hint. Piper's voice is loaded once, not for every sentence.
+("stand up", "push-up") as a hint, in English, with non-speech sounds suppressed. What whisper
+says for noise rather than speech ("Thank you.", "Thanks for watching", "Ah.") is dropped when it is
+the whole utterance. Piper's voice is loaded once, not for every sentence.
 
 **Watching it on the Mac.** Everything heavy runs on the Mac's GPU, in short bursts (Gemma 4 26B
 uses 4B parameters per token), so the Mac may not get warm. While the link is up:
