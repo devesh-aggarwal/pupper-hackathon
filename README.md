@@ -96,7 +96,9 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 ├── notebooks/           Meet the Loop, plus training/ (the code used to train the tricks)
 ├── docs/                architecture notes and Peng Xu's write-up
 ├── run_pupper.sh        one command: the Mac's local models and link, or the Pi's brain and face
+├── run_thor.sh          on the Mac: the same, with Gemma on the team's Jetson Thor instead of the Mac
 └── tools/               hackathon dev tools: ./tools/pup, brain_on_mac.sh (the local brain on a Mac),
+                         thor_relay.py (the Thor's Gemma in Ollama's terms),
                          brain_bench.py (which Gemma is the best brain), display examples
 ```
 
@@ -129,7 +131,8 @@ Startup prints that checkout's revision and local changes; it does not pull or s
 ## Running
 
 **With the local brain (no cloud):** on the Mac, `./run_pupper.sh`; see
-[The local brain on a Mac](#the-local-brain-on-a-mac).
+[The local brain on a Mac](#the-local-brain-on-a-mac). With Gemma on the Thor
+instead: `./run_thor.sh`, see [Gemma on the Thor](#gemma-on-the-thor).
 
 Once the Mac's model services and SSH link are up, the Pi can run the same command.
 Only start with Pupper on the ground, clear space around it, and a person at the e-stop:
@@ -177,6 +180,7 @@ python3 lab/test.py todo9      # one TODO
 python3 lab/test.py reminders  # the reminders (robot/test_reminders.py)
 python3 lab/test.py hackathon  # memory, screen, sound, vision, eyes, find (explore), guard, learning (or: hackathon explore)
 python3 lab/test.py brain      # the local brain with a fake Ollama: tools, fallbacks, the loop, the ears (or: brain voice)
+python3 lab/test.py brain thor # Gemma on the Thor: the real brain and relay, a fake vLLM
 python3 vision/test_eyes.py    # the depth sense on synthetic floors, chair legs, cables and walls (needs numpy)
 python3 robot/gemma_brain.py   # local Ollama, typed conversation, fake robot: nothing moves
 python3 robot/gemma_brain.py --show  # print the prompt and tool declarations, then chat
@@ -866,6 +870,45 @@ other paw and follow → stop following. Each case uses isolated temporary memor
 accepted calls, not merely attempted calls; acceptance still does not prove a physical motion
 worked. Test these changes on the fake robot first. A physical run still requires someone at
 Pupper with a hand near the e-stop; changing code does not authorize starting the robot.
+
+## Gemma on the Thor
+
+The team's Jetson Thor (a GPU board) serves Gemma 4 31B with vLLM. `./run_thor.sh` on the Mac
+runs Pupper with that as its Gemma, for the brain and for the eyes' questions, in place of the
+Mac's Ollama. Everything else is as with `./run_pupper.sh`: whisper on the Mac, the ssh link, the
+Pupper's side unchanged.
+
+```bash
+./run_thor.sh                                    # finds the Thor on thornet (10.42.0.1), else LatentSpace (192.168.2.5)
+PUPPER_THOR=http://<address>:8000 ./run_thor.sh  # or say where it is
+python3 tools/thor_relay.py --thor http://10.42.0.1:8000 --check   # can the Thor talk and call a tool?
+./run_pupper.sh                                  # back to the Mac's Gemma (the relay is swapped back by itself)
+```
+
+How it works: the Pupper's brain and eyes speak Ollama's API, and the Thor speaks OpenAI's.
+`tools/thor_relay.py` stands on the Mac's port 11435, where `tools/ollama_relay.py` stands
+otherwise (the link makes it `localhost:11435` on the Pupper), and translates: the brain's chat with
+its tools and calls (each tool reply gets the id of its call), the eyes' prompts with a frame, JSON
+mode, gzipped requests. It lists `gemma4:26b` as well as the Thor's `gemma4-31b`, because the
+Pupper's code checks for that name; the Thor's model answers either way. `tail -f
+~/.cache/pupper/logs/relay.log` shows each request with its time and tokens.
+
+Before the first run, things to know:
+
+- **The Thor's vLLM needs tool calling on.** Started as in the setup, it refuses any request with
+  tools, and the brain sends 30 with every turn. Add `--enable-auto-tool-choice --tool-call-parser
+  gemma4` to the `vllm serve` line in `~/setup_endpoint.sh` on the Thor and rerun it.
+  `run_thor.sh` checks this first and says so if it's off.
+- **The Mac must reach both** the Thor and the Pupper. thornet has no internet, so Tailscale
+  (`pi@100.88.25.110`) may not work there. Put the Pupper on the Thor's network too, and give
+  `run_thor.sh` the Pupper's address there when it asks. whisper's model and Homebrew's
+  whisper.cpp must already be on the Mac: a first run downloads them.
+- **It is slower than the Mac.** Gemma 4 31B is dense (every parameter for every token), about
+  8 tokens/s on the Thor, where the Mac's `gemma4:26b` uses 4B per token and replies in about half
+  a second. A turn with a tool call is two replies, so expect several seconds. It may choose tools
+  better, but nothing has measured that yet. The eyes' questions share the same GPU.
+- **Not yet run against the real Thor**, only against a fake vLLM (`python3 lab/test.py brain thor`).
+  The eyes send images, which nobody has tried on the Thor's endpoint yet.
 
 ## Hackathon plan
 

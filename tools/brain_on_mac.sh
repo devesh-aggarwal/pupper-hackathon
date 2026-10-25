@@ -17,6 +17,8 @@
 # Ctrl+C stops the robot. The servers and the link keep running, so ./run_pupper.sh on the Pupper
 # itself works too, until the Mac sleeps or restarts.   tools/brain_on_mac.sh stop   ends them.
 # Gemma is gemma4:26b (pulled the first time if it isn't here: about 17 GB). The first run also downloads whisper's model (about 550 MB).
+# With PUPPER_THOR set (./run_thor.sh sets it), Gemma is the Thor's instead: no Ollama here, and
+# tools/thor_relay.py stands on port 11435 in the relay's place, so the Pupper's side is the same.
 # While the link is up, http://localhost:8000 on this Mac is Pupper's app (its face and debug view).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -58,13 +60,24 @@ echo "Pupper: $(cat "$SAVED" 2>/dev/null || echo pi@100.88.25.110)"
 
 # --- 2. the brain's servers (they outlive this script: the Pupper may start on its own later)
 export OLLAMA_HOST=127.0.0.1:$OLLAMA_INTERNAL  # this Mac only: the relay and the link carry it to the Pupper
+THOR=${PUPPER_THOR:-}
 ollama_up() { curl -sf -m 2 "http://$OLLAMA_HOST/api/version" >/dev/null; }
-relay_up() { curl -sf -m 2 "http://127.0.0.1:$OLLAMA_PORT/relay" >/dev/null; }
-command -v ollama >/dev/null || die "no Ollama: brew install ollama (or ollama.com/download)"
-if ! relay_up && curl -sf -m 2 "http://127.0.0.1:$OLLAMA_PORT/api/version" >/dev/null; then  # an older setup: Ollama itself here
+# Which relay is on the port: the Thor's says so (and which Thor); Ollama's doesn't.
+relay_is() { curl -sf -m 2 "http://127.0.0.1:$OLLAMA_PORT/relay" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("thor") or "ollama")' 2>/dev/null; }
+relay_up() { [ "$(relay_is)" = "${THOR:-ollama}" ]; }
+if [ -z "$(relay_is)" ] && curl -sf -m 2 "http://127.0.0.1:$OLLAMA_PORT/api/version" >/dev/null; then  # an older setup: Ollama itself here
   alive ollama && kill "$(cat "$CACHE/ollama.pid")"; sleep 2
 fi
-if ! ollama_up; then
+if [ -n "$(relay_is)" ] && ! relay_up; then  # the other brain's relay (the Mac's Ollama, or another Thor): swap it
+  alive relay && kill "$(cat "$CACHE/relay.pid")"; pkill -f "tools/(ollama|thor)_relay.py" 2>/dev/null; sleep 1
+fi
+if [ -n "$THOR" ]; then
+  echo "Gemma: the Thor at $THOR"
+  python3 "$HERE/tools/thor_relay.py" --thor "$THOR" --check \
+    || die "the Thor isn't ready to be Pupper's brain (above). Is this Mac on the Thor's network?"
+elif ! command -v ollama >/dev/null; then
+  die "no Ollama: brew install ollama (or ollama.com/download)"
+elif ! ollama_up; then
   # The context the brain asks for (so the eyes' requests share it and nothing reloads), kept
   # loaded, two at a time (the eyes don't push the brain's prompt out of the cache).
   OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_KEEP_ALIVE=-1 OLLAMA_NUM_PARALLEL=2 nohup ollama serve > "$LOG/ollama.log" 2>&1 &
@@ -74,7 +87,7 @@ if ! ollama_up; then
   nohup caffeinate -i -w "$(cat "$CACHE/ollama.pid")" >/dev/null 2>&1 &  # no sleeping while it's the brain
 fi
 MODEL=$WANT
-if ! ollama show "$WANT" >/dev/null 2>&1; then
+if [ -z "$THOR" ] && ! ollama show "$WANT" >/dev/null 2>&1; then
   echo "pulling $WANT (once, about 17 GB)..."
   ollama pull "$WANT" || die "couldn't pull $WANT. Gemma 4 needs a recent Ollama: brew upgrade ollama, or update the app"
 fi
@@ -104,12 +117,21 @@ if ! whisper_up; then
   whisper_up || die "whisper-server didn't start (log $LOG/whisper.log)"
 fi
 if ! relay_up; then
-  nohup python3 -u "$HERE/tools/ollama_relay.py" --port $OLLAMA_PORT --ollama "http://$OLLAMA_HOST" > "$LOG/relay.log" 2>&1 &
+  if [ -n "$THOR" ]; then
+    nohup python3 -u "$HERE/tools/thor_relay.py" --port $OLLAMA_PORT --thor "$THOR" > "$LOG/relay.log" 2>&1 &
+    nohup caffeinate -i -w $! >/dev/null 2>&1 &  # no sleeping while this Mac carries the brain
+  else
+    nohup python3 -u "$HERE/tools/ollama_relay.py" --port $OLLAMA_PORT --ollama "http://$OLLAMA_HOST" > "$LOG/relay.log" 2>&1 &
+  fi
   echo $! > "$CACHE/relay.pid"
   for _ in $(seq 10); do relay_up && break; sleep 0.5; done
   relay_up || die "the Ollama relay didn't start (log $LOG/relay.log)"
 fi
-echo "brain: Ollama :$OLLAMA_INTERNAL behind the relay :$OLLAMA_PORT, whisper :$WHISPER_PORT ($WHISPER_MODEL) (logs in $LOG)"
+if [ -n "$THOR" ]; then
+  echo "brain: the Thor ($THOR) behind tools/thor_relay.py :$OLLAMA_PORT, whisper :$WHISPER_PORT ($WHISPER_MODEL) (logs in $LOG)"
+else
+  echo "brain: Ollama :$OLLAMA_INTERNAL behind the relay :$OLLAMA_PORT, whisper :$WHISPER_PORT ($WHISPER_MODEL) (logs in $LOG)"
+fi
 
 # --- 3. the link: the two ports on the Pupper, through ssh, reconnecting whenever it drops
 pupper_sees_brain() { "$PUP" sh "curl -sf -m 3 localhost:$OLLAMA_PORT/api/version >/dev/null && curl -sf -m 3 -o /dev/null localhost:$WHISPER_PORT/" >/dev/null 2>&1; }
@@ -135,8 +157,12 @@ fi
 # The eyes run on the Pupper (robot/start.sh): its camera is there, and frames are too big for its
 # WiFi to send here. Eyes an older run started on this Mac are stopped.
 if alive eyes; then kill "$(cat "$CACHE/eyes.pid")"; pkill -f "venv/bin/python -u vision/eyes.py"; rm -f "$CACHE/eyes.pid"; fi
-echo "watch: http://localhost:8000 (Pupper's app), tail -f $LOG/ollama.log (each Gemma request),"
-echo "       OLLAMA_HOST=127.0.0.1:$OLLAMA_INTERNAL ollama ps (the model on the GPU)"
+if [ -n "$THOR" ]; then
+  echo "watch: http://localhost:8000 (Pupper's app), tail -f $LOG/relay.log (each Gemma request, with its time)"
+else
+  echo "watch: http://localhost:8000 (Pupper's app), tail -f $LOG/ollama.log (each Gemma request),"
+  echo "       OLLAMA_HOST=127.0.0.1:$OLLAMA_INTERNAL ollama ps (the model on the GPU)"
+fi
 
 # --- 4. the Pupper
 echo
