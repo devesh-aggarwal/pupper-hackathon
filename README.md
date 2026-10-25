@@ -789,6 +789,11 @@ benchmark required action calls to be accepted; rerun before relying on it). The
   anyone speaks, and that exchange stays as the start of the conversation: Ollama reuses a cached
   prompt reliably only when the next request extends it, so the first turn takes half a second.
   The history is trimmed by half when it gets long, so that 10 s re-read is rare.
+- **keeps memory out of the system prompt.** Ollama reads the system prompt before the tools, so
+  a memory section there changed the start of every request after `remember` or `switch_profile`
+  and Gemma re-read all ~8k tokens (12 s for "I'm Yash"). The brain takes "What you remember" off
+  the end of the prompt, opens the conversation with it, and adds a change to the end, in the
+  memory tool's result (`memory_now`): the next reply takes half a second.
 
 Things to know:
 
