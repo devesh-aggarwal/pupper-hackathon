@@ -820,9 +820,7 @@ class Speaker:
     def _run(self) -> None:
         while True:
             text = self.q.get()
-            self.speaking.set()
             self.saying = text
-            self.on_change()
             try:
                 self._speak(text)
             except Exception as e:  # one bad sentence must not silence Pupper for the rest of the session
@@ -834,6 +832,13 @@ class Speaker:
                     self.saying = None
                     self.on_change()
 
+    def _playing(self) -> None:
+        # The mic is muted only while the sound plays, not while Piper makes it (1-3 s on the Pi):
+        # muting from the start of the sentence cut off whatever the person said meanwhile.
+        if not self.speaking.is_set():
+            self.speaking.set()
+            self.on_change()
+
     def _speak(self, text: str) -> None:
         aplay = ["aplay", "-q"] + (["-D", self.device] if self.device else [])
         if self.voice is not None:
@@ -841,13 +846,16 @@ class Speaker:
             with wave.open(buf, "wb") as w:
                 (getattr(self.voice, "synthesize_wav", None) or self.voice.synthesize)(text, w)
             print(f"  (voice: {time.time() - t0:.1f} s to make the sound)", flush=True)
+            self._playing()
             subprocess.run(aplay + ["-"], input=buf.getvalue(), check=True)
         elif self.engine == "piper":
             with tempfile.NamedTemporaryFile(suffix=".wav") as f:
                 subprocess.run([self.piper, "-m", str(self.piper_voice), "-f", f.name], input=text.encode(),
                                check=True, capture_output=True)
+                self._playing()
                 subprocess.run(aplay + [f.name], check=True)
         elif self.engine == "espeak":
+            self._playing()
             subprocess.run(["espeak-ng", "-s", "165", text], check=True, capture_output=True)
 
 

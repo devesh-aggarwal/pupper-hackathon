@@ -137,6 +137,22 @@ def set_sound_alerts(enabled: bool, sensitivity: str | None = None) -> Result:
                         " flashes the screen and I tell you)")
 
 
+# Knocking is not urgent: the robot's own sounds (its fan, a paw on the floor, its voice) made the
+# meter call KNOCKING every few seconds. Pupper's voice also made LOUD BANGs, so nothing alerts
+# while the local brain is talking (robot/server.py tells us, POST /brain/state), or just after.
+SPEECH_QUIET_S = 1.0
+_speaking_until = 0.0
+
+
+def brain_speaking(on: bool) -> None:
+    """The local brain is (or stopped) playing Pupper's voice."""
+    global _speaking_until
+    if on:
+        _speaking_until = float("inf")
+    elif _speaking_until == float("inf"):
+        _speaking_until = time.time() + SPEECH_QUIET_S
+
+
 def _moving(robot: Robot) -> bool:
     return bool(robot.following or robot.current is not None or robot.now() < robot.busy_until + MOTION_QUIET_S)
 
@@ -151,7 +167,6 @@ URGENT = {  # class -> (big words on the screen, the line under them)
     "doorbell": ("DOORBELL", "someone may be at the door"),
     "bang": ("LOUD BANG", "something dropped, slammed or fell"),
     "crash": ("CRASH", "something broke"),
-    "knock": ("KNOCKING", "someone may be at the door"),
     "baby": ("BABY CRYING", "a baby is crying"),
 }
 # A hard knock or a crash also trips the meter's bang detector, often first: the more specific
@@ -159,7 +174,7 @@ URGENT = {  # class -> (big words on the screen, the line under them)
 MORE_SPECIFIC_THAN_BANG = {"knock", "doorbell", "crash", "horn"}
 _last_urgent_cls = ""
 URGENT_COLOR = "red"
-URGENT_SECONDS = 10.0
+URGENT_SECONDS = 5.0
 
 
 def hearing_detected(robot: Robot, event: dict) -> Result:
@@ -169,6 +184,8 @@ def hearing_detected(robot: Robot, event: dict) -> Result:
         return Result(True, "ignored: sound alerts are off")
     if _moving(robot):
         return Result(True, "ignored: that was probably my own motors (I was moving)")
+    if time.time() < _speaking_until:
+        return Result(True, "ignored: that was probably my own voice")
     cls = event.get("cls", "bang")
     if cls not in URGENT:
         return Result(True, f"ignored: {cls} is not an urgent sound")

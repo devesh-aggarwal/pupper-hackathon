@@ -585,6 +585,7 @@ BRAIN = {"listening": False, "speaking": False, "caption": None, "time": 0.0,
 def brain_state_post(req: BrainStateIn):
     """The local brain: listening, speaking and the caption, now (posted on each change, and every second)."""
     BRAIN.update(listening=req.listening, speaking=req.speaking, caption=req.caption, time=time.time())
+    behaviors.brain_speaking(req.speaking)  # no sound alerts from Pupper's own voice
     return {"success": True}
 
 

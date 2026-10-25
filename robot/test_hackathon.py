@@ -212,20 +212,29 @@ async def sound_tests() -> None:
           res.message.startswith("ALARM") and alerts.display_state()["text"] == "ALARM"
           and alerts.display_state()["color"] == alerts.COLORS["red"] and len(evs) == 1 and evs[0]["for_gemini"] == "", res.message)
     for cls, words in (("siren", "SIREN"), ("horn", "CAR HORN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"),
-                       ("knock", "KNOCKING"), ("baby", "BABY CRYING")):
+                       ("baby", "BABY CRYING")):
         alerts._last_sound_alert = 0.0
         alerts.hearing_detected(rig.ts, {"cls": cls, "score": 50.0, "info": {"label": "x", "confidence": 0.8}})
         check(f"a detected {cls} shows {words} in red", alerts.display_state()["text"] == words
               and alerts.display_state()["color"] == alerts.COLORS["red"], str(alerts.display_state()))
     alerts._last_sound_alert = 0.0
     alerts.clear_display()
+    res = alerts.hearing_detected(rig.ts, {"cls": "knock", "score": 50.0})
+    check("knocking doesn't alert (the robot's own sounds kept making it)", "not an urgent sound" in res.message, res.message)
+    alerts._last_sound_alert = 0.0
+    alerts.brain_speaking(True)
+    res = alerts.hearing_detected(rig.ts, {"cls": "bang", "score": 50.0})
+    check("nothing alerts while Pupper is talking (its voice made LOUD BANGs)", "own voice" in res.message, res.message)
+    alerts.brain_speaking(False)
+    alerts._speaking_until = 0.0
+    alerts.clear_display()
     res = alerts.hearing_detected(rig.ts, {"cls": "shout", "score": 50.0})
     check("a shout doesn't alert (shouting is not on the urgent list)",
           "not an urgent sound" in res.message and alerts.display_state() is None, res.message)
     alerts._last_sound_alert = 0.0
     alerts.hearing_detected(rig.ts, {"cls": "bang", "score": 50.0})
-    res = alerts.hearing_detected(rig.ts, {"cls": "knock", "score": 60.0, "info": {"label": "Knock", "confidence": 0.7}})
-    check("a knock right after the meter's LOUD BANG replaces it with KNOCKING", alerts.display_state()["text"] == "KNOCKING", res.message)
+    res = alerts.hearing_detected(rig.ts, {"cls": "doorbell", "score": 60.0, "info": {"label": "Doorbell", "confidence": 0.7}})
+    check("a doorbell right after the meter's LOUD BANG replaces it with DOORBELL", alerts.display_state()["text"] == "DOORBELL", res.message)
     res = alerts.hearing_detected(rig.ts, {"cls": "siren", "score": 80.0})
     check("... but another sound right after is still one alert at a time", "already" in res.message, res.message)
     alerts._last_sound_alert = 0.0
