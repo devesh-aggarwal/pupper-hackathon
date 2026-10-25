@@ -41,7 +41,7 @@ By voice (or text, with `robot/gemma_brain.py`):
 
 And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 
-- **Remember people** (`remember`, `recall`, `forget`, `switch_profile`): who it is talking with,
+- **Remember people** (`remember`, `recall`, `switch_profile`): who it is talking with,
   their facts, where their things were last seen. Survives a restart; one-click reset.
 - **Hearing for people who can't**: a loud sound (knock, doorbell, crash) flashes the screen
   LOUD SOUND, Pupper says and shows what it was (`show_text`), and everything Pupper says is
@@ -56,8 +56,9 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 - **Finding things** (`find`): "where is my cup?", "look around for the whiteboard with code on it":
   Pupper looks (its detector, Gemma, its memory), turns a full circle looking, then roams the room
   in legs toward open floor it hasn't been on, and walks up to the thing when it finds it.
-- **Learning on the fly** (`learn_routine`, `do_routine`): "learn a happy dance: a push-up, then
-  spin around" records real tool calls as a named routine, no retraining.
+- **A ping to follow** (`find` / `go_to` with `ping`): "find my phone and beep when you get there":
+  on arrival Pupper chirps from its own speaker for about 3 s, so someone who can't see can walk to
+  the sound.
 - **A local brain** (`robot/gemma_brain.py`): Gemma on a Mac (`./run_pupper.sh` there), in place
   of Gemini Live: speech to text, Gemma, the same tools, text to speech, no cloud. See
   [The local brain on a Mac](#the-local-brain-on-a-mac).
@@ -73,12 +74,11 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 │   ├── part3_follow.py  prepare_to_move, follow
 │   ├── part4_tricks.py  play_trick, play_policy_trick
 │   ├── part5_interactive_action.py  interactive_action
-│   ├── hackathon_memory.py     remember, recall, forget, switch_profile (+ the memory file and CLI)
+│   ├── hackathon_memory.py     remember, recall, switch_profile (+ the memory file and CLI)
 │   ├── hackathon_alerts.py     the event bus, show_text, sound alerts
 │   ├── reminders.py            set_reminder, list_reminders, dismiss_reminder, cancel_reminder (robot/reminder_store.py)
-│   ├── hackathon_vision.py     the obstacle rules (detector + depth), the follow guard, found_object
-│   ├── hackathon_learn.py      learn_routine, finish_learning, do_routine
-│   ├── hackathon_eyes.py       go_to, look, what_is_around (steering on the eyes service's target)
+│   ├── hackathon_vision.py     the obstacle rules (detector + depth), the follow guard
+│   ├── hackathon_eyes.py       go_to, look, what_is_around (steering on the eyes service's target), the ping
 │   ├── hackathon_explore.py    find: look, sweep in place, roam in legs (a smart Roomba, no map), walk up to it
 │   ├── hackathon_log.py        the session log: tool calls, events, speech, frames (~/pupper-logs)
 │   ├── test.py          python3 lab/test.py      (tests on a fake robot: the lab's and the hackathon's)
@@ -347,10 +347,9 @@ log: a search reports back.
 **Memory** (`lab/hackathon_memory.py`). A small JSON file on the robot,
 `~/.config/gemini-pupper/memory.json` (or `$PUPPER_MEMORY_FILE`), never in the repo: one
 profile per person (facts, where their things were last seen), the active profile,
-learned routines, settings. The robot server appends "What you remember" to the prompt at
+settings. The robot server appends "What you remember" to the prompt at
 connect, so a new session starts knowing the person; during a session Gemini uses `remember`,
-`recall`, `forget` (`what='everything'` clears the person; the prompt makes Gemini ask first) and
-`switch_profile` ("I'm Devesh"). Reset, three ways: by voice, the **Memory** card in the app's
+`recall` and `switch_profile` ("I'm Devesh"). Reset, two ways: the **Memory** card in the app's
 debug view (switch person, reset this person, reset all), or on the robot:
 
 ```bash
@@ -404,8 +403,8 @@ is. Two behaviors use it:
   (both sides blocked, no fresh depth sense, or still blocked after the turn) the walk stops early
   and tells Gemini, as does anything in the way of any other move. The camera can't see beside the
   robot, so 0.5 m is a guess at "past it". Turning in place and backing away are always fine. The prompt adds the soft version: look at the camera before walking forward.
-- *Finding things* is one tool, `find` (`lab/hackathon_explore.py`, below); `found_object(name,
-  where)` remembers where a thing is when Gemini sees it in the camera or a person says.
+- *Finding things* is one tool, `find` (`lab/hackathon_explore.py`, below). Where a thing was found
+  is remembered by `find` and `go_to` themselves.
 
 **The eyes service: depth, go_to, look** (`vision/eyes.py`, `lab/hackathon_eyes.py`). The detector
 above knows 80 classes and nothing about distance, so on its own it cannot see chair legs, cables or
@@ -607,13 +606,14 @@ within 0.2 m of a wall. It has not run on the robot yet. On the robot: clear flo
 watching with a hand near the e-stop, and start with `max_seconds=30` in a small space; the one
 hazard the depth sense cannot see is a drop (stairs, a stage edge).
 
-**Learning on the fly** (`lab/hackathon_learn.py`). `learn_routine(name)` starts recording;
-every motion tool Gemini calls after that is done for real and written down (accepted calls only;
-a refused move is not part of the trick); `finish_learning()` saves it (`save=false` discards);
-`do_routine(name)` replays it, each step through the same tool and the same checks, and stops at
-the first refused step and says so. Routines are in the memory file and in the prompt's memory
-section. The recorder is a `CALL_HOOKS` entry in `robot/tool_registry.py`, the one change to the
-provided registry besides the list of modules.
+**The ping** (`lab/hackathon_eyes.py`, `play_ping`). `go_to(what, ping=true)`, and `find` with
+`ping=true` (it passes it to the `go_to` that walks up to the thing), beep on arrival: three rounds
+of three rising chirps (900 to 1800 Hz, about 3.5 s), a WAV made once in the temp folder and played
+with `aplay` through PipeWire, like the brain's voice. Gemini only sets it when the person asks for
+a sound ("beep when you find it"). It plays inside the walking job, so the hearing alerts take it for
+Pupper's own noise (a beep would otherwise look like an alarm), and a stop cuts it short. With no
+speaker the walk still succeeds and the result says why there was no ping. Tested with a fake
+speaker (`python3 lab/test.py hackathon eyes explore`); check the volume on the robot once.
 
 **Calibrated hearing** (`hearing/`). When the robot server has it (numpy, scipy and
 sounddevice, all on the Pupper), sound alerts come from `hearing/listener.py` instead of the

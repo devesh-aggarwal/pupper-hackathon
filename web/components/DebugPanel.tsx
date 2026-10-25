@@ -64,7 +64,7 @@ const DebugPanel: React.FC<DebugPanelProps> = ({ logs, videoElement, robotBridge
     return () => clearInterval(interval);
   }, [robotBridge]);
   const resetMemory = async (scope: 'profile' | 'all') => {
-    const what = scope === 'all' ? 'ALL memory (every person, reminders, routines)' : `the profile "${memory?.memory?.active}"`;
+    const what = scope === 'all' ? 'ALL memory (every person, reminders)' : `the profile "${memory?.memory?.active}"`;
     if (!window.confirm(`Reset ${what}?`)) return;
     await robotBridge.resetMemory(scope);
     refreshMemory();
@@ -356,7 +356,7 @@ const DebugPanel: React.FC<DebugPanelProps> = ({ logs, videoElement, robotBridge
                       talking with <span className="text-cyan-300 font-bold">{memory.memory.active}</span>
                       {' '}({(memory.memory.profiles?.[memory.memory.active]?.facts?.length ?? 0)} facts,
                       {' '}{Object.keys(memory.memory.profiles?.[memory.memory.active]?.objects ?? {}).length} things)
-                      {' '}· {memory.memory.reminders?.length ?? 0} reminders · {Object.keys(memory.memory.routines ?? {}).length} routines
+                      {' '}· {memory.memory.reminders?.length ?? 0} reminders
                     </div>
                     <div className="text-gray-500 truncate" title={Object.keys(memory.memory.profiles ?? {}).join(', ')}>
                       people: {Object.keys(memory.memory.profiles ?? {}).join(', ') || 'none yet'}

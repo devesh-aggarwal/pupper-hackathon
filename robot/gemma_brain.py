@@ -60,8 +60,8 @@ PIPER_VOICE = Path(os.environ.get("PUPPER_PIPER_VOICE", Path.home() / ".local/sh
 MODEL = "gemma4:26b"  # a mixture of experts, 4B parameters active per token: fast, and good at picking tools
 NUM_CTX = 16384  # the prompt and 30 tools are about 8k tokens: Ollama's default context would cut them off
 MAX_ROUNDS = 6   # tool calls in a row before Gemma has to answer
-MAX_CALLS = 24   # enough for a taught routine or a square; one bad reply cannot flood the queue
-EVENT_TOOLS = {"stop", "robot_status", "look", "what_is_around", "recall", "list_reminders", "list_routines", "show_text"}
+MAX_CALLS = 24   # enough for a square and then some; one bad reply cannot flood the queue
+EVENT_TOOLS = {"stop", "robot_status", "look", "what_is_around", "recall", "list_reminders", "show_text"}
 KEEP = 30        # messages of history kept (older ones are dropped, a turn at a time)
 STOP_WORDS = re.compile(r"^\W*(?:(?:hey\W+)?pupper\W+)?(?:stop|halt|freeze)(?:\W+(?:it|now|pupper))*\W*$", re.I)
 
@@ -379,7 +379,7 @@ class Brain:
                     self.history = []
                     self.turn_starts = []
                     return
-                changed_memory = {"remember", "forget", "switch_profile", "found_object", "finish_learning", "forget_routine"}
+                changed_memory = {"remember", "switch_profile"}
                 if any(name in changed_memory and result.get("success") for name, result in results):
                     try:
                         self.prompt = await self.backend.refresh_prompt()

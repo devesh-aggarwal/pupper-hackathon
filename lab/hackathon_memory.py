@@ -11,12 +11,11 @@ What is in it:
                 things were last seen ("keys": "on the desk", 14:02)
   active        the profile Pupper is talking to right now
   reminders     (not used: reminders are kept by robot/reminder_store.py)
-  routines      tricks taught on the fly (hackathon_learn.py)
   settings      small switches, e.g. sound alerts on/off
 
 How Gemini gets it: the robot server appends memory_prompt() to lab/prompt.md
 (GET /tools), so a new session starts knowing the person. During a session the
-remember / recall / forget / switch_profile tools below read and write it.
+remember / recall / switch_profile tools below read and write it.
 
 Easy reset, three ways: the forget tool ("forget everything"), the Memory card in the
 app's debug view, or on the robot:
@@ -55,7 +54,7 @@ MEMORY_FILE = Path(os.environ.get("PUPPER_MEMORY_FILE") or Path.home() / ".confi
 
 # ============================================================ what the robot does: the store
 def _empty() -> dict:
-    return {"active": DEFAULT_PROFILE, "profiles": {}, "reminders": [], "routines": {}, "settings": {}}
+    return {"active": DEFAULT_PROFILE, "profiles": {}, "reminders": [], "settings": {}}
 
 
 def load() -> dict:
@@ -163,33 +162,7 @@ def recall() -> Result:
         lines.append("facts: none yet")
     if prof["objects"]:
         lines.append("things: " + "; ".join(f"{k} {v['where']} ({ago(v['time'])})" for k, v in prof["objects"].items()))
-    if data["routines"]:
-        lines.append("learned routines: " + ", ".join(data["routines"]))
     return Result(True, ". ".join(lines))
-
-
-def forget(what: str) -> Result:
-    """Drop the facts (and things) that mention ``what``; "everything" clears the active profile."""
-    what = " ".join(what.split()).lower()
-    if not what:
-        return Result(False, "say what to forget: a word from the fact, or 'everything'")
-    data = load()
-    prof = active_profile(data)
-    if what in ("everything", "all", "everything about me"):
-        n = len(prof["facts"]) + len(prof["objects"])
-        prof["facts"], prof["objects"] = [], {}
-        save(data)
-        return Result(True, f"forgot everything about {data['active']} ({n} entries)")
-    gone = [f["text"] for f in prof["facts"] if what in f["text"].lower()]
-    prof["facts"] = [f for f in prof["facts"] if what not in f["text"].lower()]
-    gone_things = [k for k in prof["objects"] if what in k or what in prof["objects"][k]["where"].lower()]
-    for k in gone_things:
-        del prof["objects"][k]
-    if not gone and not gone_things:
-        return Result(False, f"nothing about '{what}' in {data['active']}'s memory; facts: "
-                             + ("; ".join(f["text"] for f in prof["facts"]) or "none"))
-    save(data)
-    return Result(True, f"forgot {len(gone) + len(gone_things)}: " + "; ".join(gone + gone_things))
 
 
 def switch_profile(name: str) -> Result:
@@ -206,11 +179,11 @@ def switch_profile(name: str) -> Result:
 
 
 def reset_memory(scope: str = "profile") -> Result:
-    """The app's and the CLI's reset: the active profile, or all memory (reminders and routines too)."""
+    """The app's and the CLI's reset: the active profile, or all memory (reminders too)."""
     data = load()
     if scope == "all":
         save(_empty())
-        return Result(True, "memory wiped: all profiles, reminders, routines and settings")
+        return Result(True, "memory wiped: all profiles, reminders and settings")
     name = data["active"]
     data["profiles"].pop(name, None)
     active_profile(data)
@@ -230,8 +203,6 @@ def memory_prompt() -> str:
         lines.append(f"- {f['text']}")
     for k, v in prof["objects"].items():
         lines.append(f"- Their {k} was last seen {v['where']} ({ago(v['time'])}).")
-    if data["routines"]:
-        lines.append("- Routines you have learned (do_routine): " + ", ".join(data["routines"]) + ".")
     pending = [r for r in data["reminders"] if not r.get("done")]
     if pending:
         lines.append("- Reminders set: " + "; ".join(f"{r['message']} at {r.get('when_text', '?')}" for r in pending) + ".")
@@ -244,7 +215,7 @@ def memory_prompt() -> str:
     "Save a fact about the person you are talking with, so you still know it after a restart:"
     " their name, likes, routine, who they are to you. Call it whenever they tell you something"
     " worth keeping ('I'm allergic to cats' -> remember(fact='allergic to cats')). Short, one fact"
-    " per call. To note where a thing is, use found_object instead.",
+    " per call.",
     fact=Param("string", "The fact, in a few words, e.g. 'likes tennis balls', 'wakes up at 9'."),
 )
 async def remember_tool(robot: Robot, fact: str) -> Result:
@@ -254,21 +225,11 @@ async def remember_tool(robot: Robot, fact: str) -> Result:
 @tool(
     "recall",
     "What you remember about the person you are talking with: their facts, where their things were"
-    " last seen, and the routines you have learned. Call it when asked 'what do you know about me',"
+    " last seen. Call it when asked 'what do you know about me',"
     " 'where are my keys', or when you need context.",
 )
 async def recall_tool(robot: Robot) -> Result:
     return recall()
-
-
-@tool(
-    "forget",
-    "Forget facts about the current person. what='everything' clears their whole profile (ask"
-    " 'are you sure?' first); any other word forgets the facts and things that mention it.",
-    what=Param("string", "A word from the fact to forget, or 'everything'."),
-)
-async def forget_tool(robot: Robot, what: str) -> Result:
-    return forget(what)
 
 
 @tool(
@@ -298,7 +259,7 @@ def _cli(argv: list[str]) -> int:
         prof = active_profile(data)
         pending = [r for r in data["reminders"] if not r.get("done")]
         print(f"talking with {data['active']} ({len(prof['facts'])} facts, {len(prof['objects'])} things);"
-              f" {len(pending)} reminder(s); routines: {', '.join(data['routines']) or 'none'}")
+              f" {len(pending)} reminder(s)")
     else:
         print(__doc__.split("Easy reset")[1].split("Same two halves")[0].strip())
         return 2

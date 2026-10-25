@@ -66,7 +66,8 @@ CASES = [
     ("Remind me in 20 minutes to take the pizza out.", lambda c, s: called(c, "set_reminder", in_minutes=num(20),
                                                                            message=has_text("pizza")), "set_reminder", 1),
     ("Remember that I like tennis balls.", lambda c, s: called(c, "remember", fact=has_text("tennis")), "remember", 1),
-    ("Put WAKE UP on your screen in red.", lambda c, s: called(c, "show_text", text=has_text("wake up"), color="red"), "show_text", 1),
+    (["I'm deaf.", "Put WAKE UP on your screen in red."],  # text is only for a deaf person: the robot refuses it otherwise
+     lambda c, s: called(c, "show_text", text=has_text("wake up"), color="red"), "remember show_text", 3),
     ("Where is my cup? Go find it.", lambda c, s: called(c, "find", what=has_text("cup")), "find recall look robot_status", 2),
     ("Follow me.", lambda c, s: called(c, "follow", enabled=True), "follow", 1),
     ("Lie down.", lambda c, s: called(c, "lie_down"), "lie_down", 1),
@@ -81,6 +82,17 @@ CASES = [
      "look recall robot_status", 2),
     ("Don't turn on sound alerts.", lambda c, s: not called(c, "sound_alerts", enabled=True)
      and not any(n in MOTION for n, _ in c) and len(s) > 3, "sound_alerts", 1),
+    ("Find my phone and beep when you get there.", lambda c, s: called(c, "find", what=has_text("phone"), ping=True),
+     "find recall robot_status", 2),
+    ("I can't see well. Go to the red mug and make a sound when you're there.",
+     lambda c, s: called(c, "go_to", what=has_text("mug"), ping=True) or called(c, "find", what=has_text("mug"), ping=True),
+     "go_to find remember look what_is_around robot_status", 3),
+    ("Find my keys.", lambda c, s: called(c, "find", what=has_text("key")) and not called(c, "find", ping=True),
+     "find recall robot_status", 2),
+    ("I'm deaf. Please listen for loud sounds like the doorbell.",
+     lambda c, s: called(c, "remember", fact=has_text("deaf")) and called(c, "sound_alerts", enabled=True),
+     "remember sound_alerts show_text", 3),
+    ("Hi, I'm Priya.", lambda c, s: called(c, "switch_profile", name=has_text("priya")), "switch_profile remember recall", 2),
     (["Sit down.", "Give me your left paw.", "Other paw."],
      lambda c, s: called(c, "play_trick", name="sit_stay_shake")
      and [a.get("action") for n, a in c if n == "interactive_action"] == ["shake_left", "shake_right"],

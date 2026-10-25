@@ -10,7 +10,7 @@ One tool, find(what), does the whole job, cheapest step first:
      open it is and whether it leads somewhere new (a coarse grid of visited cells, kept by dead
      reckoning from the speeds sent), turns that way and walks one leg, at most LEG_M, with the
      obstacle rules running every tick, and looks again. Until found, out of time, or boxed in.
-  4. found: say so, remember where, and queue a go_to to walk up to it.
+  4. found: say so, remember where, and queue a go_to to walk up to it (pinging there, if asked).
 
 It only ever sends the speeds walk and turn use, within check_move's limits; a stop cancels it
 like any job; anything in the way stops a leg the way it stops a walk. Dead reckoning drifts, so
@@ -140,7 +140,8 @@ async def seen(name: str) -> dict | None:
     return None
 
 
-async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAULT, approach: bool = True) -> Result:
+async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAULT, approach: bool = True,
+               ping: bool = False) -> Result:
     name = " ".join(looking_for.split()).lower().strip(".!?")
     for lead in ("the ", "a ", "an ", "my ", "some "):
         if name.startswith(lead):
@@ -188,6 +189,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
             show(name.upper(), "found", "green", 12, kind="found", tell_gemini=(
                 f"[search result, not the person speaking] Roaming, you found the {name}: {text}."
                 + (" You are now walking up to it; you will be told when you get there." if approach else "")
+                + (" You ping when you get there." if approach and ping else "")
                 + " Tell the person in one short sentence."))
         else:
             EVENTS.emit("search", text, for_gemini=(
@@ -225,7 +227,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
                            f"after {legs} legs" if legs else "right away")
                     res = done(True, f"found the {name} {how}: {where} ({hit['source']})", found=hit)
                     if approach:
-                        await eyes.go_to(robot, name)  # queued: it runs right after this job
+                        await eyes.go_to(robot, name, ping=ping)  # queued: it runs right after this job
                     return res
                 # 2. the sweep first: a full circle in place, looking after each step (cheap, and most things are near)
                 if sweeps < SWEEP_STEPS:
@@ -286,7 +288,8 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
     intro = (f"Finding the {name}:" + (f" last noted {last}." if last else "") + " I look, then turn a full circle in"
              f" {SWEEP_STEP_DEG:.0f}-degree steps looking after each, then roam: the most open direction that leads"
              f" somewhere new, up to {LEG_M:g} m at a time, for up to {max_s:.0f} s in all. Anything in the way stops a leg."
-             + (" When I find it I walk up to it." if approach else "") + " You will be told the result." + cannot)
+             + (" When I find it I walk up to it" + (" and ping, so they can follow the sound." if ping else ".") if approach else "")
+             + " You will be told the result." + cannot)
     return with_note(f"{note} {intro}", await robot.queue(f"find {name}", job, max_s, then=then))
 
 
@@ -302,6 +305,8 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
     " quicker." + " If follow mode is on, this ends it: say so first.",
     what=Param("string", "What to find, in a few words: 'the red mug', 'a chair', 'the white container', 'a person'."),
     max_seconds=Param("number", f"How long at most, 5 to {MAX_S_LIMIT:g} s (default {MAX_S_DEFAULT:g}); a turn in place is about 20 s of it.", required=False),
+    ping=Param("boolean", "true only when the person asks for a sound when you get there (someone who can't see"
+                          " follows it to the thing). Default false.", required=False),
 )
-async def find_tool(robot: Robot, what: str, max_seconds: float = MAX_S_DEFAULT) -> Result:
-    return await find(robot, what, max_seconds)
+async def find_tool(robot: Robot, what: str, max_seconds: float = MAX_S_DEFAULT, ping: bool = False) -> Result:
+    return await find(robot, what, max_seconds, ping=bool(ping))

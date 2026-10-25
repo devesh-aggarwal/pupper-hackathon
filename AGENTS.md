@@ -30,7 +30,7 @@ drives the ROS 2 controllers. Trick policies are trained in pupper-mjlab
 | Where | What |
 | --- | --- |
 | `lab/prompt.md`, `basics.py`, `part2_walk.py` ... `part5_interactive_action.py` | the Lab 6 tools: walking (`move`, `turn`, `arc`), `follow`, tricks, `interactive_action`. The `TODO n` cards in these files are the lab's numbering; every TODO is written, and `python3 lab/test.py todo3` tests one |
-| `lab/hackathon_*.py`, `lab/reminders.py`, `lab/fisheye_geom.py` | the hackathon's tools and rules: memory, events and the screen, reminders, the obstacle rules and follow guard, `go_to` / `look` / `what_is_around`, `find`, learned routines, the session log |
+| `lab/hackathon_*.py`, `lab/reminders.py`, `lab/fisheye_geom.py` | the hackathon's tools and rules: memory, events and the screen, reminders, the obstacle rules and follow guard, `go_to` / `look` / `what_is_around` (and the arrival ping), `find`, the session log |
 | `vision/eyes.py` | the eyes service: depth, the COCO detector and Gemma, beside the robot server |
 | `hearing/` | calibrated hearing: the meter, the detector and YAMNet |
 | `robot/` | the Robot API, the tool registry, the robot server, the reminder store, the tests, the launch files and scripts |

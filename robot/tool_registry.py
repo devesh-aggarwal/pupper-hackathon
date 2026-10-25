@@ -62,14 +62,14 @@ LAB_DIR = Path(__file__).resolve().parent.parent / "lab"
 LAB_MODULES = [
     "basics", "part2_walk", "part3_follow", "part4_tricks", "part5_interactive_action",
     # Hackathon additions (README, "Hackathon features"): memory, the screen and hearing,
-    # reminders, seeing things, and learning routines on the fly.
-    "hackathon_memory", "hackathon_alerts", "hackathon_vision", "hackathon_learn",
+    # reminders, and seeing things.
+    "hackathon_memory", "hackathon_alerts", "hackathon_vision",
     "reminders",  # set_reminder, list_reminders, dismiss_reminder, cancel_reminder (robot/reminder_store.py keeps them)
     "hackathon_eyes",  # go_to, look, what_is_around (the eyes service, vision/eyes.py)
     "hackathon_explore",  # explore: roam to find a thing
     "hackathon_log",  # the session transcript and frames (no tools; the server records into it)
 ]
-# Run after every tool call with (name, args, result); hackathon_learn records routines this way.
+# Run after every tool call with (name, args, result); hackathon_vision's follow guard watches this way.
 CALL_HOOKS: list[Callable[[str, dict, Result], None]] = []
 
 

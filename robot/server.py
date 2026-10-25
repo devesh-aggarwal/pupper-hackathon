@@ -604,7 +604,7 @@ def brain_announce(req: AnnounceIn):
 
 @app.get("/memory")
 def memory_get():
-    """The whole memory (profiles, reminders, routines) and the prompt section made from it."""
+    """The whole memory (profiles, reminders) and the prompt section made from it."""
     return {"memory": behaviors.load(), "prompt": behaviors.memory_prompt(), "file": str(behaviors.MEMORY_FILE)}
 
 
