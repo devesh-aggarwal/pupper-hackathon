@@ -873,6 +873,14 @@ Pupper with a hand near the e-stop; changing code does not authorize starting th
 
 ## Gemma on the Thor
 
+**On the Pupper, no Mac:** put the Pupper on the Thor's WiFi (ThorNet) and run `./run_thor.sh` on
+the Pupper. It starts `tools/thor_relay.py` on the Pupper (port 11436, log
+`/tmp/gemini-pupper/thor_relay.log`), points the brain and the eyes at it, and runs
+`./run_pupper.sh`. Two things must be on the Thor first: vLLM with tool calling on (below), and
+speech to text, either whisper.cpp's `whisper-server -l en --convert --host 0.0.0.0 --port 8178` or
+`vllm serve openai/whisper-large-v3-turbo --port 8001` (the brain speaks both; `PUPPER_WHISPER=<url>`
+points elsewhere). Gemma 4 31B can't take audio itself. The script says which one is missing.
+
 The team's Jetson Thor (a GPU board) serves Gemma 4 31B with vLLM. `./run_thor.sh` on the Mac
 runs Pupper with that as its Gemma, for the brain and for the eyes' questions, in place of the
 Mac's Ollama. Everything else is as with `./run_pupper.sh`: whisper on the Mac, the ssh link, the

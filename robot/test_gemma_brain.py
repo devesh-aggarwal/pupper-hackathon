@@ -534,6 +534,41 @@ def voice_tests() -> None:
           and b'name="response_format"\r\n\r\njson' in body and b'name="file"; filename="speech.wav"' in body
           and body.endswith(f"--{boundary}--\r\n".encode()) and wav in body)
 
+    # vLLM serving whisper (the Thor): an OpenAI-style /v1, asked for its model once, sent WAV.
+    import http.server, threading
+    seen = []
+
+    class FakeV1(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            seen.append(("GET", self.path, b""))
+            self._send({"data": [{"id": "openai/whisper-large-v3-turbo"}]})
+
+        def do_POST(self):
+            seen.append(("POST", self.path, self.rfile.read(int(self.headers["Content-Length"]))))
+            self._send({"text": " Stand up, please."})
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeV1)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    w = gb.Whisper(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+    heard = [w.transcribe(b"\x00\x00" * 16000), w.transcribe(b"\x00\x00" * 16000)]
+    srv.shutdown()
+    posts = [x for x in seen if x[0] == "POST"]
+    check("a /v1 whisper (vLLM on the Thor): heard, its model asked for once, WAV to /v1/audio/transcriptions",
+          heard == ["Stand up, please."] * 2 and [x[1] for x in seen if x[0] == "GET"] == ["/v1/models"]
+          and all(p[1] == "/v1/audio/transcriptions" and b"openai/whisper-large-v3-turbo" in p[2] and b"RIFF" in p[2] for p in posts),
+          (heard, [x[:2] for x in seen]))
+
     for raw, want in ((" Walk forward. ", "Walk forward."), ("[BLANK_AUDIO]", ""), ("(music) hi there", "hi there"),
                       (" ... ", ""), ("*coughs*", ""), (" Thank you.", ""), ("Thanks for watching!", ""), ("Ah.", ""),
                       ("Thank you, now sit down.", "Thank you, now sit down.")):

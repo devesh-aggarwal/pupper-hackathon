@@ -751,13 +751,18 @@ def to_opus(pcm: bytes, rate: int) -> bytes | None:
 
 
 class Whisper:
-    """Speech to text: whisper.cpp's server (whisper-server) on the Mac, POST /inference.
+    """Speech to text: whisper.cpp's server (whisper-server, on the Mac), POST /inference; or, for a
+    URL ending in /v1, an OpenAI-style server (vLLM serving whisper on the Thor), POST
+    /v1/audio/transcriptions.
 
-    Sent as Opus when ffmpeg is here (the server converts it: whisper-server --convert), else WAV."""
+    To whisper.cpp it goes as Opus when ffmpeg is here (the server converts it: whisper-server
+    --convert), else WAV. To /v1 it goes as WAV: the Thor is on the same network, so size is cheap."""
 
     def __init__(self, url: str, timeout: float = 30.0):
         self.url, self.timeout = url.rstrip("/"), timeout
-        self.opus = True  # until the server can't take it
+        self.openai = self.url.endswith("/v1")
+        self.model = ""  # the /v1 server's model, asked for once
+        self.opus = not self.openai  # until the server can't take it
         self.sent = 0
 
     # Words whisper should expect: it spells what it already knows (a hint, not a restriction).
@@ -765,6 +770,8 @@ class Whisper:
               "shake your paw, follow me, stop, remind me, remember, find my cup.")
 
     def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
+        if self.openai:
+            return self._transcribe_openai(pcm, rate)
         audio = to_opus(pcm, rate) if self.opus else None
         name, data, ctype = ("speech.ogg", audio, "audio/ogg") if audio else ("speech.wav", to_wav(pcm, rate), "audio/wav")
         body, form = multipart({"response_format": "json", "temperature": "0.0", "language": "en", "prompt": self.PROMPT},
@@ -779,6 +786,17 @@ class Whisper:
                 raise
             self.opus = False  # this whisper-server can't convert (no --convert): WAV from now on
             return self.transcribe(pcm, rate)
+
+    def _transcribe_openai(self, pcm: bytes, rate: int) -> str:
+        if not self.model:
+            with urllib.request.urlopen(self.url + "/models", timeout=self.timeout) as r:
+                self.model = json.loads(r.read())["data"][0]["id"]
+        body, form = multipart({"model": self.model, "response_format": "json", "temperature": "0.0", "language": "en",
+                                "prompt": self.PROMPT}, "file", "speech.wav", to_wav(pcm, rate), "audio/wav")
+        self.sent = len(body)
+        req = urllib.request.Request(self.url + "/audio/transcriptions", data=body, headers={"Content-Type": form})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return clean_heard(json.loads(r.read().decode()).get("text", ""))
 
 
 class Speaker:
@@ -941,7 +959,7 @@ def check(ollama_url: str, whisper_url: str, voice: bool = False) -> int:
         names = Ollama(ollama_url, "").models()
     except (OllamaError, urllib.error.URLError, OSError) as e:
         print(f"unreachable ({e}).\n  Start Pupper from the Mac (./run_pupper.sh there): it runs Ollama and"
-              " reaches the Pupper through the ssh connection.")
+              " reaches the Pupper through the ssh connection. With the Thor: ./run_thor.sh on the Pupper.")
         return 1
     print("ok: " + (", ".join(names) or "no models"))
     if MODEL not in names:
@@ -963,7 +981,8 @@ def check(ollama_url: str, whisper_url: str, voice: bool = False) -> int:
         return 1
     print(f"whisper at {whisper_url} ... ", end="", flush=True)
     try:
-        urllib.request.urlopen(whisper_url, timeout=3).close()
+        url = whisper_url.rstrip("/")
+        urllib.request.urlopen(url + "/models" if url.endswith("/v1") else url, timeout=3).close()
         print("ok")
     except (urllib.error.URLError, OSError) as e:
         print(f"unreachable ({e})" + (": Pupper can't hear without it" if voice else ": only --voice needs it"))
