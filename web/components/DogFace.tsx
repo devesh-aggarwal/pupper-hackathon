@@ -48,6 +48,7 @@ const EYE_TRACKING = {
   combinedPupilRatio: 0.6,
   smoothing: 0.15,
 };
+const FACE_FPS = 30;  // the face's redraws per second (the Pi's browser is busy enough)
 
 // SVG Geometry helpers
 const getQuadraticBezier = (start: {x:number, y:number}, ctrl: {x:number, y:number}, end: {x:number, y:number}) => {
@@ -418,15 +419,23 @@ const DogFace: React.FC<DogFaceProps> = ({ isListening, isSpeaking, audioLevel, 
     return () => { clearTimeout(timer); cancelAnimationFrame(raf); };
   }, []);
 
-  // Animation Loop for Smoothing
+  // Animation Loop for Smoothing, at most FACE_FPS: every frame re-renders the whole face, and at the
+  // display's 60 Hz that kept the Pi's browser busy. The blends are per 60 Hz frame, scaled to the
+  // time that passed, so a slower loop melts and follows just as fast.
   useEffect(() => {
     let animFrame: number;
-    
-    const loop = () => {
+    let last = 0;
+    const per60 = (rate: number, frames: number) => 1 - Math.pow(1 - rate, frames);
+
+    const loop = (now: number = performance.now()) => {
+      animFrame = requestAnimationFrame(loop);
+      if (last && now - last < 1000 / FACE_FPS - 2) return;
+      const frames = last ? Math.min(10, (now - last) / (1000 / 60)) : 1;
+      last = now;
       // Blend the expression toward the current emotion, so faces melt into each other
       const goal = EXPRESSIONS[emotionRef.current];
       const e = exprRef.current;
-      for (const k of EXPR_KEYS) e[k] += (goal[k] - e[k]) * 0.08;
+      for (const k of EXPR_KEYS) e[k] += (goal[k] - e[k]) * per60(0.08, frames);
       setExpr({ ...e });
       const t = performance.now() / 1000;
       const mood = emotionRef.current;
@@ -440,7 +449,7 @@ const DogFace: React.FC<DogFaceProps> = ({ isListening, isSpeaking, audioLevel, 
       
       const dx = target.x - current.x;
       const dy = target.y - current.y;
-      const smooth = EYE_TRACKING.smoothing;
+      const smooth = per60(EYE_TRACKING.smoothing, frames);
       
       currentPosRef.current = {
           x: current.x + dx * smooth,
@@ -448,7 +457,6 @@ const DogFace: React.FC<DogFaceProps> = ({ isListening, isSpeaking, audioLevel, 
       };
 
       setRenderPos({ ...currentPosRef.current });
-      animFrame = requestAnimationFrame(loop);
     };
     
     loop();

@@ -530,7 +530,8 @@ itself (`run_pupper.sh` installs its packages the first time; log `/tmp/gemini-p
 `curl localhost:8100/health` shows it; `stop.sh` stops it; `PUPPER_EYES=off` skips it). With the
 whole stack up and busy the Pi 5 can reach 84 °C and throttle to 1.5 GHz, and a depth frame then
 takes about a second, so the Pi's eyes run at 1 Hz and 224 px (the smallest size that still finds a
-backpack on the floor; 196 does not) and are a fallback, not a sense to walk fast on. **For the
+backpack on the floor; 196 does not), on 2 of the 4 cores (all four competed with the motor loop
+and the robot server), and are a fallback, not a sense to walk fast on. **For the
 demo, run the eyes on a laptop** (5 Hz, the commands above) or on the Jetson; its posts take
 precedence. Every post carries its frame's age, so a slow poster can never make old data look
 fresh: the robot trusts a summary for 2.5 s from its frame, and stale means blind, never wrong.
@@ -760,7 +761,9 @@ Pupper's mic, whisper, Gemma, Piper, Pupper's speaker. There is no Gemini Live o
 is doing (`POST /brain/state`: listening, speaking, the caption), and the face shows it: awake
 while the brain runs, a moving mouth and captions while Pupper talks. The app's own jobs run as
 before: the screen's cards (`show_text`, sound alerts, found it), the sound monitor on the mic,
-the on-device object detector on the camera, and reminders. A due reminder's card shows on the
+and reminders. The browser's object detector does not run here: the eyes service runs the same
+model on the Pi and posts the same detections, and running both kept the Pi at 84 °C. The face
+redraws at 30 frames a second, not the display's 60 (`FACE_FPS` in `web/components/DogFace.tsx`). A due reminder's card shows on the
 face, and the app hands it to the brain to say (`POST /brain/announce`, an event the brain reads
 like any other). Without a face, the brain claims due reminders itself, a minute late.
 

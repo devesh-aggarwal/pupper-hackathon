@@ -1,15 +1,15 @@
 import RobotBridge from './robotBridge';
 import { AppConfig, LogEntry } from '../types';
 import { SoundMonitor } from './soundMonitor';
-import { OnDeviceObjectDetector } from './objectDetector';
 
 /**
  * Pupper's brain is robot/gemma_brain.py (Gemma, no cloud), never Gemini Live, on this branch. It
  * listens and talks on the robot itself, so the face only shows it: listening, a mouth that moves
  * while it talks, and the caption, from what it posts (GET /brain/state). Everything else the
- * Gemini session does for the robot runs here too: the sound monitor on the mic and the on-device
- * object detector on the robot's camera. Reminders the app claims go to the brain to say
- * (POST /brain/announce).
+ * Gemini session does for the robot runs here too: the sound monitor on the mic. The object detector
+ * does not: the eyes service (vision/eyes.py) runs the same model on the Pi and posts the same
+ * detections, and running it twice kept the Pi at 84 C. Reminders the app claims go to the brain to
+ * say (POST /brain/announce).
  */
 export const LOCAL_BRAIN = true;  // the app never connects Gemini (no WAKE PUPPER button, no key)
 
@@ -22,7 +22,6 @@ export class LocalBrainService {
   private captionTimer: number | null = null;
   private speaking = false;
   private sound: SoundMonitor | null = null;
-  private detector: OnDeviceObjectDetector | null = null;
   private inputCtx: AudioContext | null = null;
   private stream: MediaStream | null = null;
 
@@ -45,7 +44,6 @@ export class LocalBrainService {
       this.onAudioLevel(0.08 + Math.abs(Math.sin(t * 11)) * (0.6 + 0.4 * Math.sin(t * 2.3)) * 0.45);
     }, 50));
     if (this.config.soundAlerts) await this.startSound();
-    if (this.config.enableVideo && this.config.objectDetection) this.startDetector();
   }
 
   stop() {
@@ -54,7 +52,6 @@ export class LocalBrainService {
     if (this.captionTimer) clearTimeout(this.captionTimer);
     this.stream?.getTracks().forEach(t => t.stop());
     this.inputCtx?.close().catch(() => {});
-    this.detector?.close();
   }
 
   /** A due reminder: the brain says it in its own voice. */
@@ -101,23 +98,6 @@ export class LocalBrainService {
     } catch (e: any) {
       this.log('error', `No microphone for the sound monitor: ${e?.message || e}`);
     }
-  }
-
-  private startDetector() {
-    this.detector = new OnDeviceObjectDetector();
-    this.detector.load()
-      .then(() => this.log('info', 'On-device object detector ready (MediaPipe EfficientDet-Lite0)'))
-      .catch(e => this.log('error', `Object detector failed to load: ${e?.message || e}`));
-    this.timers.push(window.setInterval(async () => {
-      if (!this.detector?.ready) return;
-      try {
-        const blob = await this.bridge.getCameraImage();
-        const frame = blob ? await this.detector.detectBlob(blob) : null;
-        if (frame) await this.bridge.postDetections(frame);
-      } catch (e) {
-        // a dropped frame is fine
-      }
-    }, 1000));
   }
 
   private log(type: LogEntry['type'], message: string) {

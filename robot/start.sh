@@ -20,9 +20,23 @@ ROS="source /opt/ros/jazzy/setup.bash; source $HOME/pupperv3-monorepo/ros2_ws/in
 
 [ -f "$REPO/web/dist/index.html" ] || { echo "Missing $REPO/web/dist: run robot/setup.sh first (it builds the web app)"; exit 1; }
 
-if pgrep -f "[r]os2_control_node" >/dev/null; then
+# A stack only counts as running if its controllers answer. One that a stop is still taking down
+# (an earlier run's Ctrl+C, or its ssh dropping, while this one starts) still has a ros2_control_node
+# for a few seconds: taking that for "already running" left a robot server with no controllers.
+stack_answers() { timeout 20 bash -c "$ROS; ros2 control list_controllers" 2>/dev/null | grep -q gemini_walk; }
+stop_stack() {  # what robot/stop.sh does to the ROS launch
+  pkill -INT -f "[g]emini_pupper.launch.py"
+  for i in $(seq 1 15); do pgrep -f "[r]os2_control_node" >/dev/null || break; sleep 1; done
+  pkill -9 -f "[g]emini_pupper.launch.py"; pkill -9 -f "[/]opt/ros/jazzy/lib/"; pkill -9 -f "[/]home/pi/pupperv3-monorepo/ros2_ws/install/"
+  sleep 1
+}
+if pgrep -f "[r]os2_control_node" >/dev/null && stack_answers; then
   echo "[1/3] robot stack already running"
 else
+  if pgrep -f "[r]os2_control_node|[g]emini_pupper.launch.py" >/dev/null; then
+    echo "      a robot stack is there but its controllers don't answer (half stopped?): restarting it"
+    stop_stack
+  fi
   echo "[1/3] starting robot stack (about a minute; log $LOG/robot.log)"
   rm -f $LOG/controllers_ready
   setsid nohup bash -c "$ROS; exec ros2 launch $HERE/launch/gemini_pupper.launch.py" > $LOG/robot.log 2>&1 < /dev/null &
@@ -42,8 +56,10 @@ curl -s -o /dev/null localhost:8000/health || { echo "robot server did not start
 
 # The eyes service on the Pi itself: the depth sense and the COCO detector, as a slow fallback (the
 # Pi 5 runs hot and throttled with the stack up: a depth frame takes about a second, so this is
-# 0.5-1 Hz). The demo runs vision/eyes.py on a laptop (5 Hz) or the Jetson, which posts over the
-# Pi's. Without any eyes the obstacle rule, go_to, explore and the follow guard are blind.
+# 0.5-1 Hz). Two threads, not four: with all four cores the depth model competed with the 520 Hz
+# motor loop and the robot server, and the Pi reached 84 C. 224 px stays: it is the smallest input
+# that still finds a backpack on the floor (196 does not; README, the eyes service). The demo runs
+# vision/eyes.py on a laptop (5 Hz) or the Jetson, which posts over the Pi's. Without any eyes the obstacle rule, go_to, explore and the follow guard are blind.
 # Log: $LOG/eyes.log. PUPPER_EYES=off skips this.
 pkill -f "[v]ision/eyes.py" 2>/dev/null
 # Gemma uses local Ollama by default. PUPPER_EYES_GEMMA=off is depth + detector only;
@@ -56,7 +72,7 @@ case "${PUPPER_EYES_GEMMA:-ollama}" in
   ollama) GEMMA="--ollama ${PUPPER_OLLAMA:-http://localhost:11435} --gemma gemma4:26b --describe-every 120" ;;
 esac
 if [ "${PUPPER_EYES:-on}" = "on" ] && python3 -c "import onnxruntime, numpy, PIL" 2>/dev/null; then
-  setsid nohup nice -n 10 python3 -u $REPO/vision/eyes.py $GEMMA --hz 1 --depth-size 224 --fetch-depth-model --fetch-detector-model \
+  setsid nohup nice -n 10 python3 -u $REPO/vision/eyes.py $GEMMA --hz 1 --depth-size 224 --threads 2 --fetch-depth-model --fetch-detector-model \
     > $LOG/eyes.log 2>&1 < /dev/null &
   for i in $(seq 1 20); do curl -s -o /dev/null localhost:8100/health && break; sleep 1; done
   curl -s -o /dev/null localhost:8100/health && echo "      eyes: depth + detector on the Pi (slow fallback: run vision/eyes.py on a laptop for the demo), Gemma $(case "$GEMMA" in --no-gemma) echo off ;; --gemma-api*) echo "through the API" ;; *) echo "at ${PUPPER_OLLAMA:-localhost}" ;; esac) (log $LOG/eyes.log)" \
