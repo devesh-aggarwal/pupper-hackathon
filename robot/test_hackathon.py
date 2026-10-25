@@ -211,7 +211,7 @@ async def sound_tests() -> None:
     check("a detected alarm turns the screen red with ALARM, and Gemini is not told",
           res.message.startswith("ALARM") and alerts.display_state()["text"] == "ALARM"
           and alerts.display_state()["color"] == alerts.COLORS["red"] and len(evs) == 1 and evs[0]["for_gemini"] == "", res.message)
-    for cls, words in (("siren", "SIREN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"),
+    for cls, words in (("siren", "SIREN"), ("horn", "CAR HORN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"),
                        ("knock", "KNOCKING"), ("baby", "BABY CRYING")):
         alerts._last_sound_alert = 0.0
         alerts.hearing_detected(rig.ts, {"cls": cls, "score": 50.0, "info": {"label": "x", "confidence": 0.8}})

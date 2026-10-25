@@ -623,14 +623,14 @@ browser's measurement. It listens through PipeWire, next to the kiosk:
 - **Bangs:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
   thresholds in dB above the room's noise floor. It also detects shouts, but shouting is
   not an alert (it is not in `URGENT` in `lab/hackathon_alerts.py`), so it shows nothing.
-- **Sirens, alarms, doorbells, crashes, knocking and a baby crying:** Google's YAMNet
+- **Sirens, car horns, alarms, doorbells, crashes, knocking and a baby crying:** Google's YAMNet
   (`hearing/classify.py`, AudioSet's 521 classes through LiteRT, on-device, about 1.5 ms per
   0.5 s).
 
 What it hears goes to `lab/hackathon_alerts.py`:
 
 - **Urgent sounds** (a hardcoded list, `URGENT`) turn the screen red with what they were (SIREN,
-  DOORBELL, KNOCKING, BABY CRYING...) for 10 s.
+  CAR HORN, DOORBELL, KNOCKING, BABY CRYING...) for 10 s.
 - **Everyday sounds** show as a small label in the top-left corner (`GET /hearing/now`); silence
   shows nothing.
 - **Gemini is never told about sounds:** Pupper shows them, it doesn't talk about them.

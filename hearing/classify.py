@@ -1,7 +1,7 @@
 """What a sound IS: Google's YAMNet (trained on AudioSet, 521 sound classes) through LiteRT, on-device.
 
 The meter (meter.py) is good at how loud a sound is. Telling a siren from a person whistling is a
-learned problem, so sirens, alarms, doorbells, crashes and a baby crying come from YAMNet. YAMNet is poor at knocks
+learned problem, so sirens, car horns, alarms, doorbells, crashes and a baby crying come from YAMNet. YAMNet is poor at knocks
 (it often calls them "Inside, small room" or "Door"), so knocking comes two ways: YAMNet itself
 (its Knock and Tap classes, as an event like a doorbell), and the meter's rhythm detector
 (detect.knock_events) through KnockGate. KnockGate keeps a meter knock whenever YAMNet heard
@@ -49,6 +49,7 @@ GROUPS = {
     "shout": ["Shout", "Yell", "Children shouting", "Screaming", "Bellow"],
     "bang": ["Bang", "Slam", "Smash, crash", "Breaking", "Glass", "Shatter", "Thump, thud",
              "Explosion", "Gunshot, gunfire"],
+    "horn": ["Vehicle horn, car horn, honking", "Air horn, truck horn", "Toot", "Train horn"],  # not "Honk": a goose
     "doorbell": ["Doorbell", "Ding-dong"],
     "crash": ["Smash, crash", "Breaking", "Glass", "Shatter"],
     "knock": ["Knock", "Tap"],
@@ -56,12 +57,12 @@ GROUPS = {
     "speech": ["Speech", "Conversation", "Narration, monologue", "Child speech, kid speaking"],
     "baby": ["Baby cry, infant cry"],
 }
-# Groups that raise events here (a siren wins over an alarm).
-EVENT_GROUPS = ("siren", "alarm", "doorbell", "crash", "baby", "knock")   # knocking also from the meter (KnockGate)
+# Groups that raise events here (a siren or a horn wins over an alarm: a horn also scores as a beep).
+EVENT_GROUPS = ("siren", "horn", "alarm", "doorbell", "crash", "baby", "knock")   # knocking also from the meter (KnockGate)
 # Windows (of the last 3) that must score >= on_score: a doorbell, a crash or a knock lasts only a
 # second or two; a baby crying must go on for 2 windows, so one squeal isn't enough.
-MIN_WINDOWS = {"siren": 2, "alarm": 2, "doorbell": 1, "crash": 1, "knock": 1, "baby": 2}
-REARM_S = {"doorbell": 4.0, "crash": 4.0, "knock": 4.0}   # a second one after this is a new event (others: rearm_s)
+MIN_WINDOWS = {"siren": 2, "horn": 1, "alarm": 2, "doorbell": 1, "crash": 1, "knock": 1, "baby": 2}  # a honk can be short
+REARM_S = {"horn": 4.0, "doorbell": 4.0, "crash": 4.0, "knock": 4.0}   # a second one after this is a new event (others: rearm_s)
 QUIET = {"Silence"}                 # what the screen's corner never shows
 DEFAULTS = {"on_score": 0.3, "off_score": 0.15, "min_above_db": 6.0, "rearm_s": 8.0}
 
@@ -148,7 +149,7 @@ class SoundClassifier:
                     self.episode[g] = ep = None
             if g == "knock" and self.t - self.last_knock_t < REARM_S["knock"]:
                 on = False                   # KnockGate already reported this knocking
-            if on and ep is None and not (g == "alarm" and self.episode["siren"] is not None):
+            if on and ep is None and not (g == "alarm" and (self.episode["siren"] or self.episode["horn"]) is not None):
                 if g == "knock":
                     self.last_knock_t = self.t
                 label = max(self.groups[g], key=lambda i: scores[i])

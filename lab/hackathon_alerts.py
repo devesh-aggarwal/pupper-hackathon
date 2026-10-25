@@ -12,7 +12,7 @@ reacts out loud without anyone speaking first.
               and every alert). The screen is how a deaf or hard-of-hearing person
               gets what Pupper would otherwise only say.
   hearing_detected()  the calibrated detector (hearing/listener.py, run by the robot server
-              as robot.hearing) heard an URGENT sound (siren, alarm, doorbell, bang, crash,
+              as robot.hearing) heard an URGENT sound (siren, car horn, alarm, doorbell, bang, crash,
               knocking, a baby crying; not shouting). The robot decides: Pupper's own motors, or one alert already showing,
               and nothing happens; otherwise the screen turns red with what it was. Gemini is
               not told: Pupper shows sounds, it doesn't talk about them.
@@ -146,6 +146,7 @@ def _moving(robot: Robot) -> bool:
 # get a small label in a corner of the screen (GET /hearing/now), and silence shows nothing.
 URGENT = {  # class -> (big words on the screen, the line under them)
     "siren": ("SIREN", "an ambulance, police car or fire truck"),
+    "horn": ("CAR HORN", "a car or truck is honking"),
     "alarm": ("ALARM", "a smoke alarm, fire alarm or timer"),
     "doorbell": ("DOORBELL", "someone may be at the door"),
     "bang": ("LOUD BANG", "something dropped, slammed or fell"),
@@ -155,7 +156,7 @@ URGENT = {  # class -> (big words on the screen, the line under them)
 }
 # A hard knock or a crash also trips the meter's bang detector, often first: the more specific
 # name replaces LOUD BANG on the screen instead of being dropped as "already alerting".
-MORE_SPECIFIC_THAN_BANG = {"knock", "doorbell", "crash"}
+MORE_SPECIFIC_THAN_BANG = {"knock", "doorbell", "crash", "horn"}
 _last_urgent_cls = ""
 URGENT_COLOR = "red"
 URGENT_SECONDS = 10.0
@@ -236,9 +237,9 @@ async def show_text_tool(robot: Robot, text: str, detail: str = "", color: str =
 @tool(
     "sound_alerts",
     "Turn hearing alerts on or off. They are off until a person asks: only turn them on when the"
-    " person asks you, in so many words, to listen or watch out for loud sounds (bangs, falls, alarms, sirens, the doorbell, knocking, a baby crying), never"
+    " person asks you, in so many words, to listen or watch out for loud sounds (bangs, falls, alarms, sirens, car horns, the doorbell, knocking, a baby crying), never"
     " on your own, and never because the words 'sound' or 'alert' came up: 'no sound alerts right now' means leave them off; if unsure, ask first."
-    " When on, urgent sounds (siren, alarm, doorbell, bang, crash, knocking, a baby crying; not shouting) turn the screen"
+    " When on, urgent sounds (siren, car horn, alarm, doorbell, bang, crash, knocking, a baby crying; not shouting) turn the screen"
     " red with what they were, and a corner of the screen shows what Pupper hears; you are not told"
     " about them. Sensitivity: low only reacts to very loud"
     " sounds, high to smaller ones. Default medium.",
