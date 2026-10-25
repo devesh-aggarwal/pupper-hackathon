@@ -80,6 +80,10 @@ class DeskBackend:
         import hackathon_memory
         return prompt_text() + "\n\n" + hackathon_memory.memory_prompt()
 
+    async def refresh_memory(self) -> str:
+        import hackathon_memory
+        return hackathon_memory.memory_prompt()
+
     async def begin_batch(self) -> int:
         return self.rig.ts.outcome_id
 
@@ -150,6 +154,9 @@ class RobotBackend:
 
     async def refresh_prompt(self) -> str:
         return (await asyncio.to_thread(self._get, "/tools"))["prompt"]
+
+    async def refresh_memory(self) -> str:
+        return (await asyncio.to_thread(self._get, "/memory"))["prompt"]
 
     async def begin_batch(self) -> int:
         state = await asyncio.to_thread(self._get, "/queue/status")

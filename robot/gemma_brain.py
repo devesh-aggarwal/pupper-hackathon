@@ -63,6 +63,12 @@ MAX_ROUNDS = 6   # tool calls in a row before Gemma has to answer
 MAX_CALLS = 24   # enough for a square and then some; one bad reply cannot flood the queue
 EVENT_TOOLS = {"stop", "robot_status", "look", "what_is_around", "recall", "list_reminders", "show_text"}
 KEEP = 30        # messages of history kept (older ones are dropped, a turn at a time)
+# The robot server ends the prompt with what Pupper remembers (lab/hackathon_memory.py, memory_prompt).
+# The brain moves it out of the system prompt, which Ollama reads before the ~5k tokens of tools: there,
+# every remember or switch_profile changed the start of the request and Gemma re-read it all (12 s for
+# "I'm Yash"). Instead the conversation opens with the memory, and a change is added to the end.
+MEMORY_HEADING = "# What you remember"
+OPENING = "[robot, not the person speaking] Your memory as this conversation starts:\n"
 STOP_WORDS = re.compile(r"^\W*(?:(?:hey\W+)?pupper\W+)?(?:stop|halt|freeze)(?:\W+(?:it|now|pupper))*\W*$", re.I)
 
 VOICE_RULES = (
@@ -245,13 +251,20 @@ class Ollama:
         return self.last.get("message") or {}
 
 
+def split_memory(prompt: str) -> tuple[str, str]:
+    """The prompt without its memory section, and the section ("" if there is none)."""
+    at = prompt.rfind("\n" + MEMORY_HEADING)
+    return (prompt, "") if at < 0 else (prompt[:at].rstrip(), prompt[at:].strip())
+
+
 # ============================================================ the loop
 class Brain:
     """One conversation with Gemma: a turn goes in, Gemma talks and calls tools until it is done."""
 
     def __init__(self, llm: Ollama, prompt: str, decls: list[dict], backend, say, keep: int = KEEP, log=print):
         self.llm, self.backend, self.say, self.log, self.keep = llm, backend, say, log, keep
-        self.prompt = prompt
+        self.prompt, self.memory = split_memory(prompt)
+        self.opening = self.memory  # the memory the conversation started with (the latest goes in tool results)
         self.decls = {d["name"]: d for d in decls}
         self.tools = ollama_tools(decls)
         self.history: list[dict] = []
@@ -272,13 +285,24 @@ class Brain:
     def system(self) -> dict:
         return {"role": "system", "content": VOICE_RULES + "\n\n" + self.prompt}
 
+    def start(self) -> list[dict]:
+        """The system prompt and the memory the conversation opened with: the same every request until
+        the conversation restarts, so Ollama keeps them, and the tools, cached."""
+        return [self.system()] + ([{"role": "user", "content": OPENING + self.opening}] if self.opening else [])
+
+    def _restart(self, history: list[dict]) -> None:
+        """A new start of the conversation (cleared or trimmed): it opens with the latest memory."""
+        self.history = history
+        self.opening = self.memory
+
     async def turn(self, text: str, image: bytes | None = None, source: str = "person") -> None:
         if source == "person" and STOP_WORDS.match(text):
             result = await self.stop()
             self.say("Stopped." if result.get("success") else result["message"])
             return
         if self.reset_next_turn:
-            self.history, self.turn_starts = [], []
+            self._restart([])
+            self.turn_starts = []
             self.reset_next_turn = False
         generation = self.generation
         self.turn_starts.append(len(self.history))
@@ -308,7 +332,7 @@ class Brain:
                     continue
                 if generation != self.generation:
                     # _ask has finished writing history, so no worker is left mutating it.
-                    self.history = []
+                    self._restart([])
                     self.turn_starts = []
                     return
                 self.log(f"  (Gemma: {time.time() - t0:.1f} s, {self.llm.sent / 1000:.0f} KB sent)")
@@ -334,7 +358,7 @@ class Brain:
                 calls_left -= len(calls)
                 for name, args in calls:
                     if generation != self.generation:
-                        self.history = []
+                        self._restart([])
                         self.turn_starts = []
                         return
                     args = coerce_args(self.decls.get(name), args)
@@ -376,17 +400,18 @@ class Brain:
                     except (urllib.error.URLError, OSError, ValueError) as e:
                         results[-1][1]["robot_state"] = {"unavailable": str(e)}
                 if generation != self.generation:
-                    self.history = []
+                    self._restart([])
                     self.turn_starts = []
                     return
-                changed_memory = {"remember", "switch_profile"}
-                if any(name in changed_memory and result.get("success") for name, result in results):
+                changed = [result for name, result in results if name in {"remember", "switch_profile"} and result.get("success")]
+                if changed:
                     try:
-                        self.prompt = await self.backend.refresh_prompt()
+                        self.memory = await self.backend.refresh_memory()
+                        changed[-1]["memory_now"] = self.memory  # at the end of the conversation: the cache holds
                     except (urllib.error.URLError, OSError, ValueError) as e:
                         self.log(f"  !! memory context refresh failed: {e}")
                 if generation != self.generation:
-                    self.history = []
+                    self._restart([])
                     self.turn_starts = []
                     return
                 if said and not failed:
@@ -399,7 +424,7 @@ class Brain:
                 self.say("I reached my limit for this request. I haven't finished it; please give me one step at a time.")
         except (OllamaError, urllib.error.URLError, OSError) as e:
             if generation != self.generation:
-                self.history = []
+                self._restart([])
                 self.turn_starts = []
                 return
             self.log(f"  !! Gemma did not answer: {e}")
@@ -414,20 +439,20 @@ class Brain:
         Returns the seconds it took."""
         t0 = time.time()
         self.turn_starts = []
-        self.history = [{"role": "user", "content": "[robot] Starting up; nobody has spoken yet. Reply with one word: ready."}]
+        self._restart([{"role": "user", "content": "[robot] Starting up; nobody has spoken yet. Reply with one word: ready."}])
         try:
             _, calls, _ = self._ask()
         except BaseException:
-            self.history = []
+            self._restart([])
             raise
         if calls:
-            self.history = []
+            self._restart([])
         return time.time() - t0
 
     def _ask(self) -> tuple[str, list[tuple[str, dict]], bool]:
         """One reply from Gemma: (what to say, the calls, whether they were native tool calls)."""
         self._fit_context()
-        m = self.llm.chat([self.system()] + self.history, tools=self.tools)
+        m = self.llm.chat(self.start() + self.history, tools=self.tools)
         content = drop_thought(m.get("content") or "")
         calls, native = native_calls(m), True
         if not calls:  # a call written out as text instead of made: it still runs
@@ -456,7 +481,7 @@ class Brain:
         if len(self.history) > self.keep:
             target = len(self.history) - self.keep // 2
             start = next((i for i in self.turn_starts if i >= target), self.turn_starts[-1] if self.turn_starts else 0)
-            self.history = self.history[start:]
+            self._restart(self.history[start:])
             self.turn_starts = [i - start for i in self.turn_starts if i >= start]
 
     def _fit_context(self) -> None:
@@ -469,14 +494,14 @@ class Brain:
         while True:
             # JPEG base64 is not text tokens. The reply reserve also leaves room for an image.
             history = [{k: v for k, v in m.items() if k != "images"} for m in self.history]
-            payload = [self.system(), history, self.tools]
+            payload = [self.start(), history, self.tools]
             size = len(json.dumps(payload, ensure_ascii=False).encode())
             if size <= budget:
                 return
             if len(self.turn_starts) < 2:
                 raise OllamaError("the current request and tools exceed the context budget; use fewer tools or a shorter request")
             start = self.turn_starts[1]
-            self.history = self.history[start:]
+            self._restart(self.history[start:])
             self.turn_starts = [i - start for i in self.turn_starts[1:]]
 
 

@@ -223,10 +223,20 @@ def loop_tests() -> None:
           rig.said == ["Hello."] and not rig.results and len(rig.ollama.requests) == 2, (rig.said, rig.results))
     rig.close()
 
-    rig = Rig([{"tool_calls": [call("remember", fact="I like reliable robots")]}, {"content": "Remembered."}])
+    rig = Rig([{"content": "ready"}, {"tool_calls": [call("remember", fact="I like reliable robots")]}, {"content": "Remembered."}])
+    rig.brain.warm()
     rig.turn("remember I like reliable robots")
-    check("new memory is in the very next model system context",
-          "I like reliable robots" in rig.ollama.requests[-1]["messages"][0]["content"])
+    before, after = rig.ollama.requests[-2]["messages"], rig.ollama.requests[-1]["messages"]
+    check("the system prompt has no memory section (it would change, and Gemma re-read the tools after it)",
+          gb.MEMORY_HEADING not in after[0]["content"] and after[0] == rig.ollama.requests[0]["messages"][0], after[0]["content"][-200:])
+    check("... the conversation opens with the memory instead", after[1]["role"] == "user"
+          and after[1]["content"].startswith(gb.OPENING) and gb.MEMORY_HEADING in after[1]["content"], after[1])
+    check("new memory is in the very next request, in the remember result at the end",
+          "I like reliable robots" in after[-1]["content"] and "memory_now" in after[-1]["content"], after[-1])
+    check("... and that request extends the one before it (Ollama's cache holds the prompt and the tools)",
+          after[:len(before)] == before, f"{len(before)} vs {len(after)} messages")
+    rig.brain._restart(rig.brain.history[2:])
+    check("a restarted conversation opens with the latest memory", "I like reliable robots" in rig.brain.start()[1]["content"])
     rig.close()
 
     rig = Rig([])
@@ -425,7 +435,7 @@ def loop_tests() -> None:
     check("warm-up: Gemma reads the whole prompt and tools once, says nothing aloud",
           len(rig.ollama.requests) == 1 and len(rig.ollama.requests[0]["tools"]) == len(rig.decls) and rig.said == [], rig.said)
     rig.turn("hello")
-    sent = [m["content"] for m in rig.ollama.requests[1]["messages"][1:]]
+    sent = [m["content"] for m in rig.ollama.requests[1]["messages"][len(rig.brain.start()):]]  # after the system prompt and memory
     check("... and the first real turn extends that exchange (so Ollama reuses what it read)",
           len(sent) == 3 and sent[0].startswith("[robot] Starting up") and sent[1] == "ready" and sent[2] == "hello", sent)
     rig.close()
@@ -479,7 +489,7 @@ def loop_tests() -> None:
     check("a camera frame goes with its turn", rig.ollama.requests[0]["messages"][-1].get("images") == ["/9hqcGVnMQ=="],
           rig.ollama.requests[0]["messages"][-1].keys())
     rig.turn("two", image=b"\xff\xd8jpeg2")
-    check("...and only the newest one is sent", [bool(m.get("images")) for m in rig.ollama.requests[1]["messages"][1:]]
+    check("...and only the newest one is sent", [bool(m.get("images")) for m in rig.ollama.requests[1]["messages"][len(rig.brain.start()):]]
           == [False, False, True])
     for i in range(5):
         rig.turn(f"turn {i}")
