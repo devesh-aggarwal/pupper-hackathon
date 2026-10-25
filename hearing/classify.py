@@ -1,10 +1,13 @@
 """What a sound IS: Google's YAMNet (trained on AudioSet, 521 sound classes) through LiteRT, on-device.
 
 The meter (meter.py) is good at how loud a sound is. Telling a siren from a person whistling is a
-learned problem, so sirens, alarms, doorbells, crashes and a baby crying come from YAMNet. YAMNet is poor at knocks
-(it calls them "Inside, small room" or "Door"), so knocking is the meter's rhythm detector
-(detect.knock_events), with KnockGate dropping the knocks YAMNet hears as speech. Bangs and shouts still come from the
-calibrated meter (detect.py).
+learned problem, so sirens, car horns, alarms, doorbells, crashes and a baby crying come from YAMNet. YAMNet is poor at knocks
+(it often calls them "Inside, small room" or "Door"), so knocking comes two ways: YAMNet itself
+(its Knock and Tap classes, as an event like a doorbell), and the meter's rhythm detector
+(detect.knock_events) through KnockGate. KnockGate keeps a meter knock whenever YAMNet heard
+anything knock-like (Knock, Tap, Door, Wood) at that moment, even over talking; without that it
+drops only knocks YAMNet is fairly sure were speech. Soft knocks (under the meter's threshold)
+need YAMNet's knock-like support. Bangs and shouts still come from the calibrated meter (detect.py).
 
 YAMNet takes 0.975 s of 16 kHz audio and scores all 521 classes; this runs it every 0.5 s on the
 last 0.975 s (about 1.5 ms each on a laptop). Classes are summed into groups (GROUPS). A siren
@@ -20,6 +23,7 @@ Setup, once (on the Pupper; nothing goes to the cloud after this):
 from __future__ import annotations
 
 import csv
+import logging
 import math
 import os
 import subprocess
@@ -28,6 +32,8 @@ from pathlib import Path
 
 import numpy as np
 from scipy import signal
+
+log = logging.getLogger(__name__)
 
 HOME = Path(os.environ.get("PUPPER_HEARING_DIR", "~/.config/gemini-pupper/hearing")).expanduser()
 MODEL_DIR = HOME / "yamnet"
@@ -43,18 +49,20 @@ GROUPS = {
     "shout": ["Shout", "Yell", "Children shouting", "Screaming", "Bellow"],
     "bang": ["Bang", "Slam", "Smash, crash", "Breaking", "Glass", "Shatter", "Thump, thud",
              "Explosion", "Gunshot, gunfire"],
+    "horn": ["Vehicle horn, car horn, honking", "Air horn, truck horn", "Toot", "Train horn"],  # not "Honk": a goose
     "doorbell": ["Doorbell", "Ding-dong"],
     "crash": ["Smash, crash", "Breaking", "Glass", "Shatter"],
-    "knock": ["Knock"],
+    "knock": ["Knock", "Tap"],
+    "knocklike": ["Knock", "Tap", "Door", "Wood"],   # support for the meter's knocks (KnockGate)
     "speech": ["Speech", "Conversation", "Narration, monologue", "Child speech, kid speaking"],
     "baby": ["Baby cry, infant cry"],
 }
-# Groups that raise events here (a siren wins over an alarm).
-EVENT_GROUPS = ("siren", "alarm", "doorbell", "crash", "baby")   # knocking comes from the meter (KnockGate)
+# Groups that raise events here (a siren or a horn wins over an alarm: a horn also scores as a beep).
+EVENT_GROUPS = ("siren", "horn", "alarm", "doorbell", "crash", "baby", "knock")   # knocking also from the meter (KnockGate)
 # Windows (of the last 3) that must score >= on_score: a doorbell, a crash or a knock lasts only a
 # second or two; a baby crying must go on for 2 windows, so one squeal isn't enough.
-MIN_WINDOWS = {"siren": 2, "alarm": 2, "doorbell": 1, "crash": 1, "knock": 1, "baby": 2}
-REARM_S = {"doorbell": 4.0, "crash": 4.0, "knock": 4.0}   # a second one after this is a new event (others: rearm_s)
+MIN_WINDOWS = {"siren": 2, "horn": 1, "alarm": 2, "doorbell": 1, "crash": 1, "knock": 1, "baby": 2}  # a honk can be short
+REARM_S = {"horn": 4.0, "doorbell": 4.0, "crash": 4.0, "knock": 4.0}   # a second one after this is a new event (others: rearm_s)
 QUIET = {"Silence"}                 # what the screen's corner never shows
 DEFAULTS = {"on_score": 0.3, "off_score": 0.15, "min_above_db": 6.0, "rearm_s": 8.0}
 
@@ -97,6 +105,8 @@ class SoundClassifier:
         self.episode: dict[str, dict | None] = {g: None for g in EVENT_GROUPS}
         self.latest: dict = {}
         self.speech: list[tuple[float, float]] = []   # (end time of a window, its speech score)
+        self.knocklike: list[tuple[float, float]] = []   # (end time of a window, its knock-like score)
+        self.last_knock_t = -math.inf                    # last knock reported, by YAMNet or KnockGate
 
     def feed(self, block: np.ndarray, above_db: float) -> tuple[dict | None, list[dict]]:
         """block: int16 at 48 kHz. above_db: how loud the room is right now over its floor (la - floor_a).
@@ -123,6 +133,7 @@ class SoundClassifier:
         top = np.argsort(scores)[::-1][:3]
         group = {g: float(scores[idx].max()) if idx else 0.0 for g, idx in self.groups.items()}
         self.speech = [(t, v) for t, v in self.speech if t > self.t - 10.0] + [(self.t, group["speech"])]
+        self.knocklike = [(t, v) for t, v in self.knocklike if t > self.t - 10.0] + [(self.t, group["knocklike"])]
         for g, v in group.items():
             self.history[g] = (self.history[g] + [v])[-3:]
         events = []
@@ -136,7 +147,11 @@ class SoundClassifier:
                     ep["score"] = max(ep["score"], group[g])
                 elif self.t - ep["last"] > REARM_S.get(g, self.p["rearm_s"]):
                     self.episode[g] = ep = None
-            if on and ep is None and not (g == "alarm" and self.episode["siren"] is not None):
+            if g == "knock" and self.t - self.last_knock_t < REARM_S["knock"]:
+                on = False                   # KnockGate already reported this knocking
+            if on and ep is None and not (g == "alarm" and (self.episode["siren"] or self.episode["horn"]) is not None):
+                if g == "knock":
+                    self.last_knock_t = self.t
                 label = max(self.groups[g], key=lambda i: scores[i])
                 self.episode[g] = {"start": self.t, "last": self.t, "score": group[g]}
                 events.append({"cls": g, "t0": round(self.t - 1.0, 2), "t1": round(self.t, 2), "t": round(self.t, 2),
@@ -153,28 +168,44 @@ class SoundClassifier:
 
 
 class KnockGate:
-    """Holds the meter's knock events until YAMNet has heard the same moment, then lets through
-    only the ones it didn't hear as speech (talking makes knock-shaped peaks too)."""
+    """Holds the meter's knock events until YAMNet has heard the same moment, then decides:
+    - YAMNet heard something knock-like (>= min_knocklike): keep it, even with talking going on.
+    - otherwise: drop soft knocks (under the meter's threshold, info["soft"]), and drop the rest
+      only if YAMNet was fairly sure it was speech (>= max_speech): loud talking makes
+      knock-shaped peaks too, but a little speech in the room shouldn't hide a real knock.
+    Every drop is logged with why, so a missed knock can be explained."""
 
-    def __init__(self, classifier: SoundClassifier, max_speech: float = 0.3):
+    def __init__(self, classifier: SoundClassifier, max_speech: float = 0.6, min_knocklike: float = 0.1):
         self.c = classifier
         self.max_speech = max_speech
+        self.min_knocklike = min_knocklike
         self.pending: list[dict] = []
 
     def add(self, ev: dict) -> None:
         self.pending.append(ev)
 
     def ready(self) -> list[dict]:
-        """Knocks YAMNet has now scored (a window ending >= 0.6 s after them) and didn't call speech."""
+        """Knocks YAMNet has now scored (a window ending >= 0.6 s after them) that pass the rules above."""
         out, keep = [], []
         for ev in self.pending:
             if self.c.t < ev["t1"] + 0.6:
                 keep.append(ev)
                 continue
-            heard = [v for t, v in self.c.speech if ev["t0"] < t <= ev["t1"] + 1.0]
-            speech = max(heard) if heard else 0.0
-            if speech < self.max_speech:
-                out.append({**ev, "info": {**ev["info"], "speech": round(speech, 2)}})
+            during = lambda h: max([v for t, v in h if ev["t0"] < t <= ev["t1"] + 1.0] or [0.0])  # noqa: E731
+            speech, knocklike = during(self.c.speech), during(self.c.knocklike)
+            soft = ev["info"].get("soft", False)
+            why = None
+            if self.c.t - self.c.last_knock_t < REARM_S["knock"]:
+                why = "YAMNet already reported this knocking"
+            elif knocklike < self.min_knocklike and soft:
+                why = f"soft knock (+{ev['score']:.0f} dB) and YAMNet heard nothing knock-like ({knocklike:.2f})"
+            elif knocklike < self.min_knocklike and speech >= self.max_speech:
+                why = f"YAMNet heard speech ({speech:.2f}) and nothing knock-like ({knocklike:.2f})"
+            if why:
+                log.info("knock dropped: %s; %s", why, ev["info"])
+                continue
+            self.c.last_knock_t = self.c.t
+            out.append({**ev, "info": {**ev["info"], "speech": round(speech, 2), "knocklike": round(knocklike, 2)}})
         self.pending = keep
         return out
 

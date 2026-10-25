@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desk tests for the local brain (robot/gemma_brain.py): no Jetson, no Ollama, no mic, no robot.
+"""Desk tests for the local brain (robot/gemma_brain.py): no Mac servers, no Ollama, no mic, no robot.
 
     python3 lab/test.py brain          # these
     python3 robot/test_gemma_brain.py  # the same
@@ -17,6 +17,7 @@ import json
 import math
 import os
 import subprocess
+import urllib.request as urllib_request
 import sys
 import tempfile
 import threading
@@ -41,7 +42,7 @@ class FakeOllama:
     """Answers /api/chat from a script: each entry is a reply message, (status, error text), or a
     function of the request body returning either. Every request is kept, to look at."""
 
-    def __init__(self, script: list, models: tuple = ("gemma4:e2b-it-qat",)):
+    def __init__(self, script: list, models: tuple = ("gemma4:26b",)):
         self.script, self.models, self.requests = list(script), models, []
         fake = self
 
@@ -86,7 +87,7 @@ def call(name: str, **args) -> dict:
 class Rig:
     """A brain on the fake robot, talking to a fake Ollama; what Pupper says is collected."""
 
-    def __init__(self, script: list, mode: str = "auto", **brain):
+    def __init__(self, script: list, **brain):
         self.ollama = FakeOllama(script)
         self.loop = asyncio.new_event_loop()  # one loop for the rig: the fake robot's job queue lives on it
         asyncio.set_event_loop(self.loop)
@@ -102,11 +103,11 @@ class Rig:
 
         self.backend.call = recording_call
         self.backend.after = lambda: None  # the fake robot's "...later" lines: not needed here
-        self.brain = gb.Brain(gb.Ollama(self.ollama.url, "gemma4:e2b-it-qat"), self.prompt, self.decls,
-                              self.backend, self.said.append, mode, log=self.lines.append, **brain)
+        self.brain = gb.Brain(gb.Ollama(self.ollama.url, gb.MODEL), self.prompt, self.decls,
+                              self.backend, self.said.append, log=self.lines.append, **brain)
 
-    def turn(self, text: str, image: bytes | None = None) -> None:
-        self.loop.run_until_complete(self.brain.turn(text, image))
+    def turn(self, text: str, image: bytes | None = None, source: str = "person") -> None:
+        self.loop.run_until_complete(self.brain.turn(text, image, source=source))
 
     def close(self, ollama: bool = True) -> None:
         if ollama:
@@ -172,16 +173,241 @@ def translation_tests() -> None:
     for text in ('I am a dog.', '{"name": "fly", "arguments": {}}', '{"say": "hi"}'):
         check(f"no call is found in {text!r}", gb.calls_in_text(text, names) == (text, []))
 
-    check("pick_model: the 26B over the small ones",
-          gb.pick_model(["gemma4:e2b-it-qat", "gemma4:26b-a4b-it-qat", "llama3:8b"]) == "gemma4:26b-a4b-it-qat")
-    check("pick_model: an Orin Nano's e2b", gb.pick_model(["gemma4:e2b-it-qat", "nomic-embed-text"]) == "gemma4:e2b-it-qat")
-    check("pick_model: gemma4:latest counts as gemma4", gb.pick_model(["gemma4:latest", "gemma4:e2b"]) == "gemma4:latest")
-    check("pick_model: no Gemma, no model", gb.pick_model(["llama3:8b"]) is None)
+    check("the brain is Gemma 4 26B", gb.MODEL == "gemma4:26b", gb.MODEL)
     check("speech is cleaned of markdown", gb.clean_speech("**Sure!** I'll  _walk_\n now.") == "Sure! I'll walk now.")
+    for raw, want in (("thought\n<channel|>", ""), ("thought\nI found your cup. It is on the table.", ""),
+                      ("<|channel>thought\nThe user wants...<channel|>I am looking for your cup.", "I am looking for your cup."),
+                      ("I thought about it: yes.", "I thought about it: yes."), ("Sure, I will sit.", "Sure, I will sit.")):
+        check(f"Gemma 4's leaked thought {raw[:30]!r} is said as {want!r}", gb.drop_thought(raw) == want, gb.drop_thought(raw))
 
 
 def loop_tests() -> None:
     print("Brain: the loop, with Gemma played by a fake Ollama")
+    rig = Rig([{"content": '{"say":"","calls":[{"name":"stand_up","args":{}}]}'},
+               {"content": '{"say":"Standing.","calls":[]}'}])
+    rig.turn("stand up")
+    check("a structured envelope in native mode is executed and never spoken as JSON",
+          [r[0] for r in rig.results] == ["stand_up"] and rig.said == ["Standing."], (rig.results, rig.said))
+    rig.close()
+
+    for raw in ("<think>private reasoning</think>Hello.", "<thinking>private reasoning</thinking>Hello."):
+        check("thinking tags never leak private reasoning into speech", gb.drop_thought(raw) == "Hello.", gb.drop_thought(raw))
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward")]}, {"content": "The search has finished."}])
+    rig.turn("[search result] found your cup", source="robot")
+    check("a robot event cannot authorize new physical actions, even if the model tries", not rig.results, rig.results)
+    rig.close()
+
+    rig = Rig([])
+    rig.turn("Pupper, stop!")
+    check("typed stop also bypasses the model entirely",
+          [r[0] for r in rig.results] == ["stop"] and not rig.ollama.requests and rig.said == ["Stopped."], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward", speed=9)]},
+               {"tool_calls": [call("move", direction="forward", speed=9)]}, {"content": "That was refused."}])
+    rig.turn("walk too fast")
+    check("the harness does not retry an identical refused call in the same turn",
+          len(rig.results) == 1 and "already refused" in rig.ollama.requests[-1]["messages"][-1]["content"], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward")] * (gb.MAX_CALLS + 1)}])
+    rig.turn("move")
+    check("an oversized model plan cannot flood the robot queue",
+          not rig.results and any("too many actions" in s for s in rig.said) and not rig.brain.history, rig.results)
+    rig.close()
+
+    rig = Rig([{"content": '{"name": "move", "arguments": {"direction": '}, {"content": '{"say":"Hello.","calls":[]}'}])
+    rig.turn("hello")
+    check("a malformed model response gets one correction opportunity, without phantom actions",
+          rig.said == ["Hello."] and not rig.results and len(rig.ollama.requests) == 2, (rig.said, rig.results))
+    rig.close()
+
+    rig = Rig([{"content": "ready"}, {"tool_calls": [call("remember", fact="I like reliable robots")]}, {"content": "Remembered."}])
+    rig.brain.warm()
+    rig.turn("remember I like reliable robots")
+    before, after = rig.ollama.requests[-2]["messages"], rig.ollama.requests[-1]["messages"]
+    check("the system prompt has no memory section (it would change, and Gemma re-read the tools after it)",
+          gb.MEMORY_HEADING not in after[0]["content"] and after[0] == rig.ollama.requests[0]["messages"][0], after[0]["content"][-200:])
+    check("... the conversation opens with the memory instead", after[1]["role"] == "user"
+          and after[1]["content"].startswith(gb.OPENING) and gb.MEMORY_HEADING in after[1]["content"], after[1])
+    check("new memory is in the very next request, in the remember result at the end",
+          "I like reliable robots" in after[-1]["content"] and "memory_now" in after[-1]["content"], after[-1])
+    check("... and that request extends the one before it (Ollama's cache holds the prompt and the tools)",
+          after[:len(before)] == before, f"{len(before)} vs {len(after)} messages")
+    rig.brain._restart(rig.brain.history[2:])
+    check("a restarted conversation opens with the latest memory", "I like reliable robots" in rig.brain.start()[1]["content"])
+    rig.close()
+
+    rig = Rig([])
+    ran = []
+
+    async def queue_failure():
+        async def fail():
+            return tt.robot_api.Result(False, "controller refused")
+
+        async def dependent():
+            ran.append(True)
+            return tt.robot_api.Result(True, "should not run")
+
+        robot = rig.backend.rig.ts
+        await robot.queue("prerequisite", fail, 1, then=tt.robot_api.UNCHANGED)
+        await robot.queue("dependent", dependent, 1, then=tt.robot_api.UNCHANGED)
+        await rig.backend.rig.settle()
+        return robot.status()
+
+    state = rig.loop.run_until_complete(queue_failure())
+    check("a job failure clears dependent queued actions and exposes its real outcome",
+          not ran and not state["queued"] and not state["outcomes"][-1]["success"]
+          and "controller refused" in state["outcomes"][-1]["message"], state)
+    rig.close()
+
+    rig = Rig([], keep=4)
+    rig.brain.history = [{"role": "user", "content": "actual request"},
+                         {"role": "assistant", "content": "call"},
+                         {"role": "user", "content": "[tool results, from the robot] result"},
+                         {"role": "assistant", "content": "answer"},
+                         {"role": "user", "content": "next actual request"},
+                         {"role": "assistant", "content": "next answer"}]
+    rig.brain.turn_starts = [0, 4]
+    rig.brain._trim()
+    check("history pruning retains complete turns, never orphaned synthetic tool results",
+          rig.brain.history[0]["content"] == "next actual request" and rig.brain.turn_starts == [0], rig.brain.history)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward", speed=9), call("turn", direction="left")]},
+               {"content": "That move was refused; I did not turn."}])
+    rig.turn("walk and turn")
+    check("a refused prerequisite prevents the rest of the batch from executing",
+          [r[0] for r in rig.results] == ["move"], rig.results)
+    messages = rig.ollama.requests[-1]["messages"]
+    check("the model gets a result for the skipped call so it can reassess",
+          "not run" in messages[-1]["content"] and messages[-1]["tool_name"] == "turn", messages[-1])
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("stand_up"), call("move", direction="forward")]}, {"content": "Unavailable."}])
+    del rig.brain.decls["stand_up"]
+    rig.turn("stand and move")
+    check("disabled tools cannot run, and their dependent calls are skipped", rig.results == [], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [{"function": {"name": "move", "arguments": "broken json"}}]},
+               {"content": "I could not read that command."}])
+    rig.turn("move")
+    check("malformed arguments never turn into a default move", rig.results == [], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward", duration="NaN")]},
+               {"content": "The duration must be finite."}])
+    rig.turn("move")
+    check("non-finite numeric arguments are refused by the server",
+          not rig.results[0][2]["success"] and "finite" in rig.results[0][2]["message"], rig.results)
+    rig.close()
+
+    rig = Rig([{"tool_calls": [call("move", direction="forward")]}])
+    entered, release = threading.Event(), threading.Event()
+    ask = rig.brain._ask
+
+    def delayed():
+        entered.set()
+        release.wait(5)
+        return ask()
+
+    rig.brain._ask = delayed
+
+    async def interrupt():
+        task = asyncio.create_task(rig.brain.turn("walk forward"))
+        await asyncio.to_thread(entered.wait, 5)
+        await rig.brain.stop()
+        release.set()
+        await task
+
+    rig.loop.run_until_complete(interrupt())
+    check("stop discards a model decision that arrives late, with no motion or stale speech",
+          [r[0] for r in rig.results] == ["stop"] and not rig.said and not rig.brain.history,
+          (rig.results, rig.said))
+    rig.close()
+
+    class SlowToolHandler(BaseHTTPRequestHandler):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            payload = json.dumps({"running": self.entered.is_set() and not self.release.is_set(),
+                                  "queued": 0, "outcomes": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self):
+            if self.path.endswith("/move"):
+                self.entered.set()
+                self.release.wait(3)
+            payload = b'{"success":true,"message":"accepted"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowToolHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    async def concurrent_stop():
+        backend = gb.RobotBackend(f"http://127.0.0.1:{server.server_port}")
+        move = asyncio.create_task(backend.call("move", {}))
+        try:
+            entered = await asyncio.to_thread(SlowToolHandler.entered.wait, 2)
+            result = await asyncio.wait_for(backend.call("stop", {}), 1)
+            check("a pending HTTP tool request does not block stop on the event loop",
+                  entered and result["success"] and not move.done())
+            pending = await backend.finish_batch(timeout=0)
+            check("a batch observation timeout reports pending work, never fabricated completion", pending["running"])
+        finally:
+            SlowToolHandler.release.set()
+            await move
+
+    asyncio.run(concurrent_stop())
+    server.shutdown()
+    server.server_close()
+
+    rig = Rig([{"content": "Hello."}])
+    rig.brain.history = [{"role": "user", "content": "old request " + "x" * 100000},
+                         {"role": "assistant", "content": "old answer"}]
+    rig.brain.turn_starts = [0]
+    rig.turn("hello")
+    check("large old turns are removed by size before sending a new request",
+          rig.said == ["Hello."] and not any("old request" in m.get("content", "")
+          for m in rig.ollama.requests[0]["messages"]), rig.said)
+    rig.close()
+
+    rig = Rig([])
+    rig.turn("x" * 100000)
+    check("an oversized current turn is rejected before any model request or action",
+          not rig.results and not rig.ollama.requests and bool(rig.said), rig.results)
+    rig.close()
+
+    sys.path.insert(0, str(HERE.parent / "tools"))
+    import brain_bench
+    ollama = FakeOllama([{"tool_calls": [call("move", direction="forward", speed=9)]},
+                         {"content": "That speed is too fast."}])
+    result = asyncio.run(brain_bench.one(
+        ollama.url, "fake", "walk forward", lambda calls, speech: brain_bench.called(calls, "move"),
+        "move", 1, False))
+    check("the benchmark does not count a refused action as task success", not result["ok"], result)
+    ollama.close()
+
+    for raw in ('[]', '{"say":"done","calls":[null]}', '{"name": "move", "arguments": {"direction": '):
+        rig = Rig([{"content": raw}, {"content": raw}])  # the correction comes back broken too
+        rig.turn("stand up")
+        check("malformed structured replies fail clearly without speaking model protocol or acting",
+              rig.results == [] and rig.said == ["Sorry, my brain isn't answering right now."],
+              (raw, rig.results, rig.said))
+        rig.close()
+
     rig = Rig([{"content": "", "tool_calls": [call("move", direction="forward", duration="2")]},
                {"content": "I walked forward for two seconds."}])
     rig.turn("walk forward for 2 seconds")
@@ -189,7 +415,7 @@ def loop_tests() -> None:
     check("Gemma gets every tool, the prompt and the voice rules", len(first["tools"]) == len(rig.decls)
           and first["messages"][0]["role"] == "system" and gb.VOICE_RULES in first["messages"][0]["content"]
           and rig.prompt[:200] in first["messages"][0]["content"])
-    check(f"with a context of {gb.NUM_CTX} tokens (Ollama's default would cut the tools off), not thinking, kept loaded",
+    check(f"with a context of {gb.NUM_CTX} tokens (Ollama's default would cut the tools off), not thinking (it's slow), kept loaded",
           first["options"]["num_ctx"] == gb.NUM_CTX and first["think"] is False and first["keep_alive"] == -1, first["options"])
     ran = rig.results[0] if rig.results else None
     check("Gemma's call ran on the robot, with '2' read as 2.0", ran is not None and ran[0] == "move"
@@ -204,12 +430,36 @@ def loop_tests() -> None:
     check("...and the fake robot really walked forward", any(m.linear.x > 0 for m in twists), f"{len(twists)} speed commands")
     rig.close()
 
+    rig = Rig([{"content": "ready"}, {"content": "Hi there."}])
+    rig.brain.warm()
+    check("warm-up: Gemma reads the whole prompt and tools once, says nothing aloud",
+          len(rig.ollama.requests) == 1 and len(rig.ollama.requests[0]["tools"]) == len(rig.decls) and rig.said == [], rig.said)
+    rig.turn("hello")
+    sent = [m["content"] for m in rig.ollama.requests[1]["messages"][len(rig.brain.start()):]]  # after the system prompt and memory
+    check("... and the first real turn extends that exchange (so Ollama reuses what it read)",
+          len(sent) == 3 and sent[0].startswith("[robot] Starting up") and sent[1] == "ready" and sent[2] == "hello", sent)
+    rig.close()
+
+    rig = Rig([{"content": "", "tool_calls": [call("move", direction="forward")]}])
+    rig.brain.warm()
+    check("warm-up: a call in its reply is not run, and that exchange isn't kept",
+          rig.results == [] and rig.said == [] and rig.brain.history == [], (rig.results, rig.brain.history))
+    rig.close()
+
+    rig = Rig([{"content": "", "tool_calls": [call("find", what="cup")]},
+               {"content": "thought\nI found your cup. It is on the table."}])
+    rig.turn("where is my cup? find it")
+    check("a thought that leaks after a tool result is never said (here it claimed a find that never happened)",
+          rig.said == [] and rig.brain.history[-1]["content"] == "", (rig.said, rig.brain.history[-1]))
+    rig.close()
+
     rig = Rig([{"content": "Zoom!", "tool_calls": [call("move", direction="forward", speed=9)]},
                {"content": "That's too fast for me: 1.5 metres a second at most."}])
     rig.turn("run forward at 9 metres a second")
     reply = json.loads(rig.ollama.requests[1]["messages"][-1]["content"])
     check("a refusal goes back to Gemma with the limit in it", reply["success"] is False and "1.5" in reply["message"], reply)
-    check("words said with a call are said first, then the answer", rig.said == ["Zoom!", "That's too fast for me: 1.5 metres a second at most."], rig.said)
+    check("a refused action's optimistic preamble is not spoken; only the corrected answer is",
+          rig.said == ["That's too fast for me: 1.5 metres a second at most."], rig.said)
     rig.close()
 
     rig = Rig([{"content": '```json\n{"name": "stand_up", "arguments": {}}\n```'}, {"content": "I'm up."}])
@@ -219,26 +469,6 @@ def loop_tests() -> None:
     check("...and its result goes back as a message Gemma can read", last["role"] == "user"
           and last["content"].startswith("[tool results, from the robot] stand_up ->"), last)
     check("...and the JSON is not read out loud", rig.said == ["I'm up."], rig.said)
-    rig.close()
-
-    rig = Rig([(400, "registry.ollama.ai/library/gemma3:4b does not support tools"),
-               {"content": json.dumps({"say": "Standing up.", "calls": [{"name": "stand_up", "args": {}}]})},
-               {"content": json.dumps({"say": "Done, I'm standing.", "calls": []})}])
-    rig.turn("stand up")
-    reqs = rig.ollama.requests
-    check("auto: a model that can't do tools switches to JSON replies", rig.brain.mode == "json" and len(reqs) == 3, rig.lines)
-    check("...asked with a reply schema and no tools", "tools" not in reqs[1] and reqs[1]["format"]["required"] == ["say", "calls"]
-          and "stand_up" in reqs[1]["format"]["properties"]["calls"]["items"]["properties"]["name"]["enum"])
-    check("...and the tool list written into the prompt", "- move: Walk" in reqs[1]["messages"][0]["content"])
-    check("...and the call ran, and both sentences were said", [r[0] for r in rig.results] == ["stand_up"]
-          and rig.said == ["Standing up.", "Done, I'm standing."], (rig.results, rig.said))
-    rig.close()
-
-    rig = Rig([lambda body: (400, '"gemma3:4b" does not support thinking') if "think" in body else {"content": "Woof."}])
-    rig.ollama.script.append(lambda body: {"content": "Woof."})
-    rig.turn("hello")
-    check("a model that can't be told about thinking is asked again without it",
-          rig.said == ["Woof."] and "think" not in rig.ollama.requests[-1] and rig.brain.llm.think is None, rig.lines)
     rig.close()
 
     rig = Rig([{"content": "", "tool_calls": [call("robot_status")]}] * 10)
@@ -259,7 +489,7 @@ def loop_tests() -> None:
     check("a camera frame goes with its turn", rig.ollama.requests[0]["messages"][-1].get("images") == ["/9hqcGVnMQ=="],
           rig.ollama.requests[0]["messages"][-1].keys())
     rig.turn("two", image=b"\xff\xd8jpeg2")
-    check("...and only the newest one is sent", [bool(m.get("images")) for m in rig.ollama.requests[1]["messages"][1:]]
+    check("...and only the newest one is sent", [bool(m.get("images")) for m in rig.ollama.requests[1]["messages"][len(rig.brain.start()):]]
           == [False, False, True])
     for i in range(5):
         rig.turn(f"turn {i}")
@@ -304,8 +534,44 @@ def voice_tests() -> None:
           and b'name="response_format"\r\n\r\njson' in body and b'name="file"; filename="speech.wav"' in body
           and body.endswith(f"--{boundary}--\r\n".encode()) and wav in body)
 
+    # vLLM serving whisper (the Thor): an OpenAI-style /v1, asked for its model once, sent WAV.
+    import http.server, threading
+    seen = []
+
+    class FakeV1(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            seen.append(("GET", self.path, b""))
+            self._send({"data": [{"id": "openai/whisper-large-v3-turbo"}]})
+
+        def do_POST(self):
+            seen.append(("POST", self.path, self.rfile.read(int(self.headers["Content-Length"]))))
+            self._send({"text": " Stand up, please."})
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeV1)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    w = gb.Whisper(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+    heard = [w.transcribe(b"\x00\x00" * 16000), w.transcribe(b"\x00\x00" * 16000)]
+    srv.shutdown()
+    posts = [x for x in seen if x[0] == "POST"]
+    check("a /v1 whisper (vLLM on the Thor): heard, its model asked for once, WAV to /v1/audio/transcriptions",
+          heard == ["Stand up, please."] * 2 and [x[1] for x in seen if x[0] == "GET"] == ["/v1/models"]
+          and all(p[1] == "/v1/audio/transcriptions" and b"openai/whisper-large-v3-turbo" in p[2] and b"RIFF" in p[2] for p in posts),
+          (heard, [x[:2] for x in seen]))
+
     for raw, want in ((" Walk forward. ", "Walk forward."), ("[BLANK_AUDIO]", ""), ("(music) hi there", "hi there"),
-                      (" ... ", ""), ("*coughs*", "")):
+                      (" ... ", ""), ("*coughs*", ""), (" Thank you.", ""), ("Thanks for watching!", ""), ("Ah.", ""),
+                      ("Thank you, now sit down.", "Thank you, now sit down.")):
         check(f"whisper's {raw!r} is heard as {want!r}", gb.clean_heard(raw) == want, gb.clean_heard(raw))
     for text in ("Stop!", "stop.", "Pupper, stop.", "hey pupper stop", "Stop now!", "Freeze!"):
         check(f"{text!r} stops at once", bool(gb.STOP_WORDS.match(text)))
@@ -313,14 +579,43 @@ def voice_tests() -> None:
         check(f"{text!r} goes to Gemma, not straight to stop", not gb.STOP_WORDS.match(text))
 
 
+def relay_tests() -> None:
+    print("Brain: the gzip relay (tools/ollama_relay.py) in front of Ollama, for the Pupper's slow WiFi")
+    ollama = FakeOllama([{"content": "Hello."}])
+    port = 18000 + os.getpid() % 1000
+    relay = subprocess.Popen([sys.executable, str(HERE.parent / "tools" / "ollama_relay.py"), "--port", str(port),
+                              "--ollama", ollama.url], stdout=subprocess.DEVNULL)
+    try:
+        import time as _t
+        for _ in range(50):
+            try:
+                urllib_request.urlopen(f"http://127.0.0.1:{port}/relay", timeout=1).close()
+                break
+            except OSError:
+                _t.sleep(0.1)
+        llm = gb.Ollama(f"http://127.0.0.1:{port}", gb.MODEL)
+        m = llm.chat([{"role": "user", "content": "hi " * 2000}])
+        check("through the relay, the brain sends gzip and Ollama gets the request whole",
+              llm.gzip is True and m.get("content") == "Hello." and ollama.requests[0]["messages"][0]["content"] == "hi " * 2000
+              and llm.sent < 1000, (llm.gzip, llm.sent, m))
+        direct = gb.Ollama(ollama.url, gb.MODEL)
+        direct.chat([{"role": "user", "content": "hi"}])
+        check("straight to Ollama (no relay), it sends plain JSON", direct.gzip is False)
+    finally:
+        relay.kill()
+        ollama.close()
+
+
 def cli_tests() -> None:
     print("Brain: the command line, end to end (python3 robot/gemma_brain.py, typing, on the fake robot)")
     script = HERE / "gemma_brain.py"
-    ollama = FakeOllama([{"content": "", "tool_calls": [call("stand_up")]}, {"content": "Up I get!"}],
-                        models=("llama3:8b", "gemma4:e2b-it-qat"))
+    ollama = FakeOllama([{"content": ""},  # the warm-up
+                         {"content": "", "tool_calls": [call("stand_up")]}, {"content": "Up I get!"}],
+                        models=("llama3:8b", "gemma4:26b"))
     out = subprocess.run([sys.executable, str(script), "--ollama", ollama.url], input="stand up\nquit\n",
                          capture_output=True, text=True, timeout=60, env=os.environ).stdout
-    check("it picks the Gemma Ollama has", "Gemma: gemma4:e2b-it-qat" in out, out[:300])
+    check("its Gemma is gemma4:26b", "Gemma: gemma4:26b" in out, out[:300])
+    check("it warms Gemma up before the first turn", "ready (" in out, out[:400])
     check("it runs Gemma's call on the fake robot and says the answer",
           "-> Gemma calls stand_up({})" in out and '"success": true' in out and "Pupper > Up I get!" in out, out[-600:])
     ollama.close()
@@ -332,14 +627,25 @@ def cli_tests() -> None:
           proc.returncode == 0 and "talks" in proc.stdout and "native, ok" in proc.stdout and "only --voice needs it" in proc.stdout,
           proc.stdout[-500:])
     ollama.close()
+    ollama2 = FakeOllama([{"content": "Hi."}, {"content": "", "tool_calls": [call("stand_up")]}])
     proc = subprocess.run([sys.executable, str(script), "--check", "--ollama", "http://127.0.0.1:9"],
                           capture_output=True, text=True, timeout=60)
-    check("--check: no Jetson says what to look at", proc.returncode == 1 and "jetson/link.sh" in proc.stdout, proc.stdout)
+    check("--check: Ollama unreachable says what to do (start Pupper from the Mac)",
+          proc.returncode == 1 and "Start Pupper from the Mac" in proc.stdout, proc.stdout)
+    proc = subprocess.run([sys.executable, str(script), "--check", "--voice", "--ollama", ollama2.url, "--whisper",
+                           "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
+    check("--check --voice: no whisper is a failure (Pupper couldn't hear)",
+          proc.returncode == 1 and "can't hear without it" in proc.stdout, proc.stdout[-300:])
+    ollama2.close()
+    ollama3 = FakeOllama([], models=("llama3:8b",))
+    proc = subprocess.run([sys.executable, str(script), "--check", "--ollama", ollama3.url], capture_output=True, text=True, timeout=60)
+    check("--check: no gemma4:26b says how to pull it", proc.returncode == 1 and "ollama pull gemma4:26b" in proc.stdout, proc.stdout[-300:])
+    ollama3.close()
     proc = subprocess.run([sys.executable, str(script), "--ollama", "http://127.0.0.1:9"], capture_output=True, text=True, timeout=60)
-    check("no Jetson: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
+    check("no Ollama: it says so, and points at --check", proc.returncode == 1 and "--check" in proc.stderr, proc.stderr)
 
 
-GROUPS = {"translation": translation_tests, "loop": loop_tests, "voice": voice_tests, "cli": cli_tests}
+GROUPS = {"translation": translation_tests, "loop": loop_tests, "voice": voice_tests, "relay": relay_tests, "cli": cli_tests}
 
 
 def main(groups: list[str]) -> None:

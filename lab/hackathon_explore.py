@@ -10,7 +10,7 @@ One tool, find(what), does the whole job, cheapest step first:
      open it is and whether it leads somewhere new (a coarse grid of visited cells, kept by dead
      reckoning from the speeds sent), turns that way and walks one leg, at most LEG_M, with the
      obstacle rules running every tick, and looks again. Until found, out of time, or boxed in.
-  4. found: say so, remember where, and queue a go_to to walk up to it.
+  4. found: say so, remember where, and queue a go_to to walk up to it (pinging there, if asked).
 
 It only ever sends the speeds walk and turn use, within check_move's limits; a stop cancels it
 like any job; anything in the way stops a leg the way it stops a walk. Dead reckoning drifts, so
@@ -52,7 +52,7 @@ SWEEP_STEPS = 5  # 5 turns + the look before the first one = 6 looks around the 
 SECTORS = [("left", -60.0), ("center-left", -30.0), ("center", 0.0), ("center-right", 30.0), ("right", 60.0)]
 MIN_LEG_M = 0.1  # a leg shorter than this did not start
 
-EXPLORING: dict = {"name": "", "since": 0.0}
+EXPLORING: dict = {"name": "", "since": 0.0, "started": False}  # started: the queued search began
 rng = random.Random()
 
 
@@ -140,7 +140,8 @@ async def seen(name: str) -> dict | None:
     return None
 
 
-async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAULT, approach: bool = True) -> Result:
+async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAULT, approach: bool = True,
+               ping: bool = False) -> Result:
     name = " ".join(looking_for.split()).lower().strip(".!?")
     for lead in ("the ", "a ", "an ", "my ", "some "):
         if name.startswith(lead):
@@ -153,6 +154,11 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
         return Result(False, f"max_seconds must be a number of seconds, at most {MAX_S_LIMIT:g}")
     if not 5.0 <= max_s <= MAX_S_LIMIT:
         return Result(False, f"max_seconds must be between 5 and {MAX_S_LIMIT:g} s (asked {max_s:g})")
+    # The same search again while one is queued or running would roam twice. A queued search that a
+    # stop dropped never starts, so it only counts while something is still queued or running.
+    status = robot.status()
+    if EXPLORING["name"] == name and (EXPLORING["started"] or status["queued"] or status["running"]):
+        return Result(True, f"already looking for the {name}: you'll get a [search result] when that search ends")
     from part2_walk import check_move  # here, not at the top: part2_walk imports hackathon_vision
 
     speeds = robot.speeds()
@@ -168,14 +174,14 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
     state = robot.state_after_queue
     walker = robot.walking_controller(state)
     then = state if walker != LOCOMOTION_CONTROLLER else LOCOMOTION
-    EXPLORING.update(name=name, since=time.time())
+    EXPLORING.update(name=name, since=time.time(), started=False)
     last = memory.where_is(name)
     cannot = (f" My detector doesn't know '{name}'; my eyes ask Gemma for it at each stop, and your eyes on the camera matter too."
               if not any(vision._matches(name, c) for c in vision.COCO_NAMES) else "")
 
     def done(ok: bool, text: str, *, found: dict | None = None) -> Result:
         robot.send_speed(0, 0, 0)
-        EXPLORING.update(name="", since=0.0)
+        EXPLORING.update(name="", since=0.0, started=False)
         if found:
             where = (f"{vision.side_of({'box': found['box']})}, {vision.how_close({'box': found['box']})}" if found.get("box")
                      else "in view from where I stopped")
@@ -183,6 +189,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
             show(name.upper(), "found", "green", 12, kind="found", tell_gemini=(
                 f"[search result, not the person speaking] Roaming, you found the {name}: {text}."
                 + (" You are now walking up to it; you will be told when you get there." if approach else "")
+                + (" You ping when you get there." if approach and ping else "")
                 + " Tell the person in one short sentence."))
         else:
             EVENTS.emit("search", text, for_gemini=(
@@ -196,6 +203,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
 
     async def job() -> Result:
         pose = DeadReckoning()
+        EXPLORING["started"] = True
         try:
             if robot.fallen:
                 return Result(False, FELL_MESSAGE)
@@ -219,7 +227,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
                            f"after {legs} legs" if legs else "right away")
                     res = done(True, f"found the {name} {how}: {where} ({hit['source']})", found=hit)
                     if approach:
-                        await eyes.go_to(robot, name)  # queued: it runs right after this job
+                        await eyes.go_to(robot, name, ping=ping)  # queued: it runs right after this job
                     return res
                 # 2. the sweep first: a full circle in place, looking after each step (cheap, and most things are near)
                 if sweeps < SWEEP_STEPS:
@@ -238,7 +246,7 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
                     failed += 1
                     if failed >= STUCK_LEGS:
                         return done(False, f"boxed in: nothing open in any direction {STUCK_LEGS} times in a row; no {name}"
-                                           f" seen in {legs} legs. Ask the person to clear some floor, or tell me where to look")
+                                           f" seen in {legs} legs. Ask the person where to look")
                 else:
                     bearing, leg = choice
                 # 4. turn to it (turning in place is always allowed)
@@ -270,17 +278,18 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
                 failed = failed + 1 if walked < MIN_LEG_M else 0
                 if failed >= STUCK_LEGS:
                     return done(False, f"boxed in: {STUCK_LEGS} legs in a row could not start; no {name} seen in {legs} legs."
-                                       " Ask the person to clear some floor, or tell me where to look")
+                                       " Ask the person where to look")
             return done(False, f"no {name} found in {max_s:.0f} s and {legs} legs; I have seen about"
                                f" {len(pose.visited)} square metres. Ask me to keep looking, or say where it might be")
         except asyncio.CancelledError:
-            EXPLORING.update(name="", since=0.0)
+            EXPLORING.update(name="", since=0.0, started=False)
             raise
 
     intro = (f"Finding the {name}:" + (f" last noted {last}." if last else "") + " I look, then turn a full circle in"
              f" {SWEEP_STEP_DEG:.0f}-degree steps looking after each, then roam: the most open direction that leads"
              f" somewhere new, up to {LEG_M:g} m at a time, for up to {max_s:.0f} s in all. Anything in the way stops a leg."
-             + (" When I find it I walk up to it." if approach else "") + " You will be told the result." + cannot)
+             + (" When I find it I walk up to it" + (" and ping, so they can follow the sound." if ping else ".") if approach else "")
+             + " You will be told the result." + cannot)
     return with_note(f"{note} {intro}", await robot.queue(f"find {name}", job, max_s, then=then))
 
 
@@ -292,10 +301,12 @@ async def find(robot: Robot, looking_for: str, max_seconds: float = MAX_S_DEFAUL
     " for everyday things, Gemma for anything you can name, and its memory of where things were), then"
     " turns a full circle in steps looking after each, then roams the room, stopping for anything in the"
     " way, for up to max_seconds. Found: you are told where (a [search result]) and Pupper walks up to it."
-    " Not found: you are told that too. Only when a person asks; roaming needs clear floor and someone"
-    " watching. For a thing you can already see, go_to is quicker." + " If follow mode is on, this ends it: say so first.",
+    " Not found: you are told that too. Only when a person asks. For a thing you can already see, go_to is"
+    " quicker." + " If follow mode is on, this ends it: say so first.",
     what=Param("string", "What to find, in a few words: 'the red mug', 'a chair', 'the white container', 'a person'."),
     max_seconds=Param("number", f"How long at most, 5 to {MAX_S_LIMIT:g} s (default {MAX_S_DEFAULT:g}); a turn in place is about 20 s of it.", required=False),
+    ping=Param("boolean", "true only when the person asks for a sound when you get there (someone who can't see"
+                          " follows it to the thing). Default false.", required=False),
 )
-async def find_tool(robot: Robot, what: str, max_seconds: float = MAX_S_DEFAULT) -> Result:
-    return await find(robot, what, max_seconds)
+async def find_tool(robot: Robot, what: str, max_seconds: float = MAX_S_DEFAULT, ping: bool = False) -> Result:
+    return await find(robot, what, max_seconds, ping=bool(ping))

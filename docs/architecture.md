@@ -1,5 +1,9 @@
 # Gemini Pupper Architecture
 
+This document describes the original Gemini Live architecture. On the local-brain branch,
+Gemma/Whisper on a Mac and the Python harness on the Pi replace the browser's Gemini session.
+Use the [README](../README.md#the-local-brain-on-a-mac) for current startup and harness behavior.
+
 This page explains how the browser application, Gemini models, and the physical Pupper robot work together.
 
 ## The 30-second explanation

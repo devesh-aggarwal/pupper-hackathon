@@ -37,11 +37,9 @@ import logging
 import time
 import urllib.error
 
-import hackathon_memory as memory
-from hackathon_alerts import EVENTS, show
+from hackathon_alerts import EVENTS
 from part3_follow import prepare_to_move
-from robot_api import FELL_MESSAGE, LLM_CMD_RATE, LOCOMOTION, LOCOMOTION_CONTROLLER, Result, Robot, with_note
-from tool_registry import Param, tool
+from robot_api import FELL_MESSAGE, LLM_CMD_RATE, LOCOMOTION, LOCOMOTION_CONTROLLER, Result, with_note
 
 log = logging.getLogger("vision")
 
@@ -516,21 +514,6 @@ def what_i_see() -> Result:
         return Result(True, "the detector sees nothing it knows right now. " + freespace_words())
     return Result(True, "I detect: " + "; ".join(describe(d) for d in sorted(dets, key=lambda d: -d["score"])[:8])
                   + ". " + freespace_words())
-
-
-# ============================================================ what Gemini reads
-@tool(
-    "found_object",
-    "Remember where a thing is, when you see it in the camera or the person tells you ('my keys are"
-    " on the desk'). Later, find and recall start from this. Also shows it on the screen.",
-    name=Param("string", "The thing, e.g. 'keys', 'cup'."),
-    where=Param("string", "Where it is, in a few words: 'on the desk, to my left', 'under the chair'."),
-)
-async def found_object_tool(robot: Robot, name: str, where: str) -> Result:
-    res = memory.remember_object(name, where)
-    if res.ok:
-        show(name.upper(), where, "green", 12, kind="found")
-    return res
 
 
 def _openness(st: dict) -> float:

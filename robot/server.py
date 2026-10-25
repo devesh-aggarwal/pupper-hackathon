@@ -21,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -453,6 +454,16 @@ class SpeechIn(BaseModel):
     text: str
 
 
+class BrainStateIn(BaseModel):
+    listening: bool = True  # the mic is open (it closes while Pupper talks)
+    speaking: bool = False
+    caption: str | None = None  # what Pupper is saying now
+
+
+class AnnounceIn(BaseModel):
+    text: str
+
+
 class MemoryScope(BaseModel):
     scope: str = "profile"  # or "all"
 
@@ -468,6 +479,14 @@ def events(after: int = -1):
     for the last id, so a fresh session doesn't replay history."""
     bus = behaviors.EVENTS
     return {"events": bus.since(after) if after >= 0 else [], "last": bus.last_id}
+
+
+@app.get("/config/api_key")
+def api_key():
+    """The Gemini key saved on the Pupper (~/.config/gemini-pupper/api_key), so the app on the
+    robot's network needn't type it in. Anyone who can reach port 8000 can read it."""
+    f = Path("~/.config/gemini-pupper/api_key").expanduser()
+    return {"api_key": f.read_text().strip() if f.is_file() else ""}
 
 
 @app.get("/display")
@@ -556,9 +575,37 @@ def transcript_get(n: int = 50):
     return {"entries": behaviors.tail(n), "file": str(behaviors.transcript_file())}
 
 
+# The local brain (robot/gemma_brain.py) has no browser of its own: it posts what it is doing, and
+# the face (the web app) shows it.
+BRAIN = {"listening": False, "speaking": False, "caption": None, "time": 0.0,
+         "local": os.environ.get("PUPPER_BRAIN") == "gemma"}  # run_pupper.sh started the local brain: no Gemini
+
+
+@app.post("/brain/state")
+def brain_state_post(req: BrainStateIn):
+    """The local brain: listening, speaking and the caption, now (posted on each change, and every second)."""
+    BRAIN.update(listening=req.listening, speaking=req.speaking, caption=req.caption, time=time.time())
+    behaviors.brain_speaking(req.speaking)  # no sound alerts from Pupper's own voice
+    return {"success": True}
+
+
+@app.get("/brain/state")
+def brain_state_get():
+    """What the face shows for the local brain; age_s says how long since it last spoke up (null: never)."""
+    return {**BRAIN, "age_s": round(time.time() - BRAIN["time"], 1) if BRAIN["time"] else None,
+            "text": behaviors.needs_text()}  # text on the screen: only for a deaf or hard-of-hearing person
+
+
+@app.post("/brain/announce")
+def brain_announce(req: AnnounceIn):
+    """A due reminder the face claimed, for the local brain to say: it arrives as an event, like a sound alert."""
+    behaviors.EVENTS.emit("reminder", req.text[:300], for_gemini=req.text)
+    return {"success": True, "message": "told the brain"}
+
+
 @app.get("/memory")
 def memory_get():
-    """The whole memory (profiles, reminders, routines) and the prompt section made from it."""
+    """The whole memory (profiles, reminders) and the prompt section made from it."""
     return {"memory": behaviors.load(), "prompt": behaviors.memory_prompt(), "file": str(behaviors.MEMORY_FILE)}
 
 

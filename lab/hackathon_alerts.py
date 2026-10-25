@@ -12,8 +12,8 @@ reacts out loud without anyone speaking first.
               and every alert). The screen is how a deaf or hard-of-hearing person
               gets what Pupper would otherwise only say.
   hearing_detected()  the calibrated detector (hearing/listener.py, run by the robot server
-              as robot.hearing) heard an URGENT sound (siren, alarm, doorbell, bang, crash,
-              shout, knocking, a baby crying). The robot decides: Pupper's own motors, or one alert already showing,
+              as robot.hearing) heard an URGENT sound (siren, car horn, alarm, doorbell, bang, crash,
+              knocking, a baby crying; not shouting). The robot decides: Pupper's own motors, or one alert already showing,
               and nothing happens; otherwise the screen turns red with what it was. Gemini is
               not told: Pupper shows sounds, it doesn't talk about them.
   sound_detected()  the fallback, when the robot has no calibrated detector: the browser
@@ -137,6 +137,22 @@ def set_sound_alerts(enabled: bool, sensitivity: str | None = None) -> Result:
                         " flashes the screen and I tell you)")
 
 
+# Knocking is not urgent: the robot's own sounds (its fan, a paw on the floor, its voice) made the
+# meter call KNOCKING every few seconds. Pupper's voice also made LOUD BANGs, so nothing alerts
+# while the local brain is talking (robot/server.py tells us, POST /brain/state), or just after.
+SPEECH_QUIET_S = 1.0
+_speaking_until = 0.0
+
+
+def brain_speaking(on: bool) -> None:
+    """The local brain is (or stopped) playing Pupper's voice."""
+    global _speaking_until
+    if on:
+        _speaking_until = float("inf")
+    elif _speaking_until == float("inf"):
+        _speaking_until = time.time() + SPEECH_QUIET_S
+
+
 def _moving(robot: Robot) -> bool:
     return bool(robot.following or robot.current is not None or robot.now() < robot.busy_until + MOTION_QUIET_S)
 
@@ -146,20 +162,19 @@ def _moving(robot: Robot) -> bool:
 # get a small label in a corner of the screen (GET /hearing/now), and silence shows nothing.
 URGENT = {  # class -> (big words on the screen, the line under them)
     "siren": ("SIREN", "an ambulance, police car or fire truck"),
+    "horn": ("CAR HORN", "a car or truck is honking"),
     "alarm": ("ALARM", "a smoke alarm, fire alarm or timer"),
     "doorbell": ("DOORBELL", "someone may be at the door"),
     "bang": ("LOUD BANG", "something dropped, slammed or fell"),
     "crash": ("CRASH", "something broke"),
-    "shout": ("SHOUTING", "someone is shouting"),
-    "knock": ("KNOCKING", "someone may be at the door"),
     "baby": ("BABY CRYING", "a baby is crying"),
 }
 # A hard knock or a crash also trips the meter's bang detector, often first: the more specific
 # name replaces LOUD BANG on the screen instead of being dropped as "already alerting".
-MORE_SPECIFIC_THAN_BANG = {"knock", "doorbell", "crash"}
+MORE_SPECIFIC_THAN_BANG = {"knock", "doorbell", "crash", "horn"}
 _last_urgent_cls = ""
 URGENT_COLOR = "red"
-URGENT_SECONDS = 10.0
+URGENT_SECONDS = 5.0
 
 
 def hearing_detected(robot: Robot, event: dict) -> Result:
@@ -169,6 +184,8 @@ def hearing_detected(robot: Robot, event: dict) -> Result:
         return Result(True, "ignored: sound alerts are off")
     if _moving(robot):
         return Result(True, "ignored: that was probably my own motors (I was moving)")
+    if time.time() < _speaking_until:
+        return Result(True, "ignored: that was probably my own voice")
     cls = event.get("cls", "bang")
     if cls not in URGENT:
         return Result(True, f"ignored: {cls} is not an urgent sound")
@@ -227,6 +244,9 @@ def sound_detected(robot: Robot, above_db: float, level_db: float = 0.0, duratio
 async def show_text_tool(robot: Robot, text: str, detail: str = "", color: str = "blue", seconds: float = 10.0) -> Result:
     if not text.strip():
         return Result(False, "nothing to show: give a few words")
+    if not memory.needs_text():
+        return Result(False, "not shown: the screen shows text only for a deaf or hard-of-hearing person"
+                             " (remember it if they say so); say it out loud instead")
     show(text, detail, color, seconds)
     return Result(True, f"showing '{text.strip()[:80]}' on the screen in {color} for {max(1.0, min(seconds, 600.0)):g} s")
 
@@ -234,9 +254,9 @@ async def show_text_tool(robot: Robot, text: str, detail: str = "", color: str =
 @tool(
     "sound_alerts",
     "Turn hearing alerts on or off. They are off until a person asks: only turn them on when the"
-    " person asks you, in so many words, to listen or watch out for loud sounds (bangs, falls, shouts, alarms, sirens, the doorbell, knocking, a baby crying), never"
+    " person asks you, in so many words, to listen or watch out for loud sounds (bangs, falls, alarms, sirens, car horns, the doorbell, knocking, a baby crying), never"
     " on your own, and never because the words 'sound' or 'alert' came up: 'no sound alerts right now' means leave them off; if unsure, ask first."
-    " When on, urgent sounds (siren, alarm, doorbell, bang, crash, shouting, knocking, a baby crying) turn the screen"
+    " When on, urgent sounds (siren, car horn, alarm, doorbell, bang, crash, knocking, a baby crying; not shouting) turn the screen"
     " red with what they were, and a corner of the screen shows what Pupper hears; you are not told"
     " about them. Sensitivity: low only reacts to very loud"
     " sounds, high to smaller ones. Default medium.",

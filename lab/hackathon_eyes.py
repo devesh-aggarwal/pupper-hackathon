@@ -15,6 +15,8 @@ loop on the robot closes the gap, the way the Lab 5 person follower does for peo
                      service ("is anyone waving?", "what is on the floor ahead?").
   what_is_around     the scene description Gemma posts while Pupper is idle, plus the depth
                      sense and the detector: what the brain reads before planning a move.
+  ping               go_to(what, ping=True), or find's: on arrival Pupper beeps from its own
+                     speaker, so a person who can't see can walk to the sound and find the thing.
 
 The obstacle rules in hackathon_vision.py (detector + depth) run inside the go_to loop too.
 """
@@ -26,9 +28,13 @@ import json
 import logging
 import math
 import os
+import struct
+import tempfile
 import time
+import wave
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import fisheye_geom
 import hackathon_memory as memory
@@ -57,11 +63,20 @@ ARRIVE_TICKS = 8  # ... for this many ticks in a row (0.4 s, two depth frames): 
 SLOW_M = 0.9  # from here on, half speed (a bottom-unknown target, ranged by the depth strip in metres)
 # Gemma takes 2-3 s per fix, and the eyes service wants two fixes that agree before it posts the first
 # box, so the first box takes 5-8 s and then one comes every 2-3 s.
-SEE_S = 10.0  # how long to stand and wait for the eyes to find the thing at all
-LOST_S = 6.0  # how long to keep going on the last box before giving up
-TARGET_FRESH_S = 4.0  # a box older than this is not steered on
+# Over the Pupper's slow WiFi, a Gemma sighting takes several seconds, and the robot steers only once
+# two agree: 10 s to see, 4 s fresh and 6 s lost gave up just before the box came (a pink can,
+# found by find, then "can't see it (waited 10 s)" 3 s before the eyes posted its box).
+SEE_S = 30.0  # how long to stand and wait for the eyes to find the thing at all
+LOST_S = 12.0  # how long to keep going on the last box before giving up
+TARGET_FRESH_S = 8.0  # a box older than this is not steered on
 SCENE_FRESH_S = 90.0
 EYES_TIMEOUT_S = 25.0
+
+# The arrival ping: rising chirps, loud and easy to place by ear (a sweep is easier to locate than a pure tone).
+PING_WAV = Path(tempfile.gettempdir()) / "pupper_ping.wav"
+PING_RATE = 22050
+PING_CHIRP_S, PING_GAP_S, PING_CHIRPS, PING_ROUNDS, PING_PAUSE_S = 0.15, 0.12, 3, 3, 0.5  # about 3.5 s in all
+PING_HZ = (900.0, 1800.0)
 
 # What go_to wants tracked (the eyes service polls GET /vision/wanted), and the latest box
 # (POST /vision/target). box = [x, y, w, h] as fractions of the frame, or None (looked, not there).
@@ -169,7 +184,45 @@ def steer(b: float, walk: float, turn: float, wz_min: float, vx_min: float, dist
     return vx, wz
 
 
-async def go_to(robot: Robot, what: str) -> Result:
+# ============================================================ what the robot does: the ping
+def ping_wav() -> Path:
+    """The ping as a WAV file (made once): PING_ROUNDS rounds of PING_CHIRPS rising chirps."""
+    if PING_WAV.exists():
+        return PING_WAV
+    lo, hi = PING_HZ
+    n = int(PING_CHIRP_S * PING_RATE)
+    chirp, phase = [], 0.0
+    for i in range(n):
+        phase += 2 * math.pi * (lo + (hi - lo) * i / n) / PING_RATE
+        fade = min(1.0, i / 200, (n - i) / 200)  # no clicks at the ends
+        chirp.append(int(0.7 * 32767 * fade * math.sin(phase)))
+    gap = [0] * int(PING_GAP_S * PING_RATE)
+    one_round = (chirp + gap) * PING_CHIRPS
+    samples = (one_round + [0] * int(PING_PAUSE_S * PING_RATE)) * PING_ROUNDS
+    with wave.open(str(PING_WAV), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(PING_RATE)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    return PING_WAV
+
+
+async def play_ping() -> str:
+    """Beep on the robot's speaker (through PipeWire, like the brain's voice). "" if it played, else why not."""
+    try:
+        proc = await asyncio.create_subprocess_exec("aplay", "-q", str(ping_wav()),
+                                                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    except (FileNotFoundError, OSError) as e:
+        return f"no speaker to ping with ({e})"
+    try:
+        _, err = await proc.communicate()
+    except asyncio.CancelledError:  # a stop: the ping stops too
+        proc.kill()
+        raise
+    return "" if proc.returncode == 0 else f"the speaker failed: {err.decode(errors='replace').strip()[:80]}"
+
+
+async def go_to(robot: Robot, what: str, ping: bool = False) -> Result:
     name = " ".join(what.split()).lower().strip(".!?")
     for lead in ("the ", "a ", "an ", "my ", "that ", "this "):
         if name.startswith(lead):
@@ -202,6 +255,14 @@ async def go_to(robot: Robot, what: str) -> Result:
             " nothing else about what you see."))
         return Result(ok, text)
 
+    async def arrived(text: str, where: str) -> Result:
+        # The ping plays inside the job, so the hearing alerts take it for Pupper's own noise.
+        robot.send_speed(0, 0, 0)
+        if ping:
+            problem = await play_ping()
+            text += f"; couldn't ping: {problem}" if problem else "; pinged, so the person can follow the sound"
+        return done(True, text, where=where)
+
     async def job() -> Result:
         if robot.fallen:
             return Result(False, FELL_MESSAGE)
@@ -210,7 +271,9 @@ async def go_to(robot: Robot, what: str) -> Result:
             WANTED.update(name="", since=0.0)
             return res
         start = robot.now()
-        deadline = start + max_s
+        # One move's time (max_s) counts from the first sighting: standing still while the eyes look
+        # (up to SEE_S) is not moving, and over the Pupper's slow WiFi it can take a while.
+        deadline = start + SEE_S + max_s
         walked = 0.0
         last_box: list | None = None
         last_seen: float | None = None
@@ -229,6 +292,8 @@ async def go_to(robot: Robot, what: str) -> Result:
                 return Result(False, FELL_MESSAGE)
             hit = target_box(name)
             if hit:
+                if last_seen is None:
+                    deadline = robot.now() + max_s
                 last_box, source, bottom_known = hit
                 last_seen = robot.now()
                 taken = TARGET["time"] if source != "detector" else vision.VISION["time"]
@@ -258,8 +323,8 @@ async def go_to(robot: Robot, what: str) -> Result:
             else:
                 near_ticks, near_fixes = 0, set()
             if near_ticks >= ARRIVE_TICKS and len(near_fixes) >= 2:
-                return done(True, f"reached the {name}: it is right in front of me, {vision.how_near(near)}",
-                            where=f"where I walked to it ({vision.side_of(_det(last_box))})")
+                return await arrived(f"reached the {name}: it is right in front of me, {vision.how_near(near)}",
+                                     f"where I walked to it ({vision.side_of(_det(last_box))})")
             if near_ticks:  # hold still until the next fix confirms it
                 robot.send_speed(0, 0, 0)
                 await robot.sleep(1.0 / LLM_CMD_RATE)
@@ -274,8 +339,8 @@ async def go_to(robot: Robot, what: str) -> Result:
                     # ahead. A far target (its base up near the horizon) behind a near obstacle is a stop.
                     about_there = (near is not None and near >= NEAR_NEARNESS) or (near is None and abs(aim) <= AIM_DEG * 2)
                     if abs(aim) <= WALK_WITHIN_DEG and about_there:
-                        return done(True, f"reached the {name}: stopped right in front of it ({blocked.split(';')[0]})",
-                                    where="right in front of me, where I stopped")
+                        return await arrived(f"reached the {name}: stopped right in front of it ({blocked.split(';')[0]})",
+                                             "right in front of me, where I stopped")
                     return done(False, f"stopped on the way to the {name}: {blocked}")
             if walked + vx / LLM_CMD_RATE > limits.distance_max:
                 return done(False, f"gave up after {walked:.1f} m (at most {limits.distance_max} m in one go): the {name}"
@@ -296,7 +361,8 @@ async def go_to(robot: Robot, what: str) -> Result:
     else:
         intro = f"Walking to the {name} once my eyes find it (I don't see it yet; I wait up to {SEE_S:.0f} s)."
     intro += (f" I turn toward it and walk at up to {speeds.walk:g} m/s, stop at arm's length or if something"
-              f" is in the way, and give up after {max_s:.0f} s. You will be told the result.")
+              f" is in the way, and give up after {max_s:.0f} s." + (" When I get there I ping, so they can follow the sound." if ping else "")
+              + " You will be told the result.")
     return with_note(f"{note} {intro}", await robot.queue(f"go to {name}", job, 10.0, then=then))
 
 
@@ -351,9 +417,11 @@ def around() -> Result:
     " instead. Use it for 'come here', 'go to the couch', 'walk over to the ball'."
     " If follow mode is on, this ends it: say so first.",
     what=Param("string", "What to walk to, in a few words: 'the red mug', 'the person in blue', 'the chair'."),
+    ping=Param("boolean", "true only when the person asks for a sound when you get there (someone who can't see"
+                          " follows it to the thing). Default false.", required=False),
 )
-async def go_to_tool(robot: Robot, what: str) -> Result:
-    return await go_to(robot, what)
+async def go_to_tool(robot: Robot, what: str, ping: bool = False) -> Result:
+    return await go_to(robot, what, ping=bool(ping))
 
 
 @tool(

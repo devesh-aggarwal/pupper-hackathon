@@ -4,10 +4,10 @@
 
 # Gemini Pupper (CS 123 Lab 6, finished)
 
-Talk to Pupper, and it listens, looks and does what you ask. Gemini Live is the brain: a
-foundation model that hears you, sees through the camera and talks back. Trained policies are
-the muscles. In between are the tools: the only way Gemini can move the robot, and the only way
-it learns what really happened.
+Talk to Pupper, and it listens, looks and acts through validated tools. On this branch, the brain
+is local Gemma through Ollama: Whisper transcribes speech on the Mac, the Python harness runs
+on the Pi, and Piper speaks through Pupper. The browser is its face. Trained policies drive
+the legs; the model never commands motors directly. No Gemini key is needed for this setup.
 
 This repo is a working copy of CS 123 Lab 6 (*Bringing Your Pupper to Life*) with every part
 done: all 11 TODOs written, and the sit-stay-shake and spider tricks trained and installed. It is
@@ -21,7 +21,7 @@ the lab handout is
 
 ## What it can do
 
-By voice (or text, with `lab/chat.py`):
+By voice (or text, with `robot/gemma_brain.py`):
 
 - **Walk, turn, run, sidestep and curve** (`move`, `turn`, `arc`), including shapes like squares
   and circles. Unsafe requests are refused with the limit that applies ("too fast: |vx|<=1.5 m/s").
@@ -41,7 +41,7 @@ By voice (or text, with `lab/chat.py`):
 
 And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 
-- **Remember people** (`remember`, `recall`, `forget`, `switch_profile`): who it is talking with,
+- **Remember people** (`remember`, `recall`, `switch_profile`): who it is talking with,
   their facts, where their things were last seen. Survives a restart; one-click reset.
 - **Hearing for people who can't**: a loud sound (knock, doorbell, crash) flashes the screen
   LOUD SOUND, Pupper says and shows what it was (`show_text`), and everything Pupper says is
@@ -56,11 +56,12 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 - **Finding things** (`find`): "where is my cup?", "look around for the whiteboard with code on it":
   Pupper looks (its detector, Gemma, its memory), turns a full circle looking, then roams the room
   in legs toward open floor it hasn't been on, and walks up to the thing when it finds it.
-- **Learning on the fly** (`learn_routine`, `do_routine`): "learn a happy dance: a push-up, then
-  spin around" records real tool calls as a named routine, no retraining.
-- **A local brain** (`robot/gemma_brain.py`): Gemma on a Jetson, by an Ethernet cable to the Pi,
-  in place of Gemini Live: speech to text, Gemma, the same tools, text to speech, no cloud. See
-  [The local brain](#the-local-brain-gemma-on-a-jetson-by-ethernet).
+- **A ping to follow** (`find` / `go_to` with `ping`): "find my phone and beep when you get there":
+  on arrival Pupper chirps from its own speaker for about 3 s, so someone who can't see can walk to
+  the sound.
+- **A local brain** (`robot/gemma_brain.py`): Gemma on a Mac (`./run_pupper.sh` there), in place
+  of Gemini Live: speech to text, Gemma, the same tools, text to speech, no cloud. See
+  [The local brain on a Mac](#the-local-brain-on-a-mac).
 
 ## What's where
 
@@ -73,30 +74,32 @@ And, for the hackathon (details in [Hackathon features](#hackathon-features)):
 │   ├── part3_follow.py  prepare_to_move, follow
 │   ├── part4_tricks.py  play_trick, play_policy_trick
 │   ├── part5_interactive_action.py  interactive_action
-│   ├── hackathon_memory.py     remember, recall, forget, switch_profile (+ the memory file and CLI)
+│   ├── hackathon_memory.py     remember, recall, switch_profile (+ the memory file and CLI)
 │   ├── hackathon_alerts.py     the event bus, show_text, sound alerts
 │   ├── reminders.py            set_reminder, list_reminders, dismiss_reminder, cancel_reminder (robot/reminder_store.py)
-│   ├── hackathon_vision.py     the obstacle rules (detector + depth), the follow guard, found_object
-│   ├── hackathon_learn.py      learn_routine, finish_learning, do_routine
-│   ├── hackathon_eyes.py       go_to, look, what_is_around (steering on the eyes service's target)
+│   ├── hackathon_vision.py     the obstacle rules (detector + depth), the follow guard
+│   ├── hackathon_eyes.py       go_to, look, what_is_around (steering on the eyes service's target), the ping
 │   ├── hackathon_explore.py    find: look, sweep in place, roam in legs (a smart Roomba, no map), walk up to it
 │   ├── hackathon_log.py        the session log: tool calls, events, speech, frames (~/pupper-logs)
 │   ├── test.py          python3 lab/test.py      (tests on a fake robot: the lab's and the hackathon's)
 │   └── chat.py          python3 lab/chat.py      (talk to Gemini in text)
-├── jetson/              the local brain's setup: setup.sh (the Jetson), setup_pi.sh (the Pi), link.sh (the cable)
 ├── vision/              the eyes service: eyes.py (depth + Gemma, beside the robot server), test_eyes.py
 ├── tricks/              one folder per trick (policy.json + trick.yaml)
 │   ├── sit_stay_shake/  trained here; covers sit and stand_sit_shake_sit_stand, so it hides them
 │   └── spider_walk/     trained here: clip policy + walk_policy.json; covers spider, so it hides it
 ├── robot/               the Robot API, robot server, launch files, setup/start/stop scripts
 │                        (test_tools.py: the lab's tests; test_hackathon.py: the hackathon's)
-│                        gemma_brain.py: the local brain (Gemma on the Jetson); test_gemma_brain.py
+│                        gemma_brain.py: the local brain (Gemma on the Mac); test_gemma_brain.py
 ├── web/                 the web app (face + debug view, Gemini Live client; services/soundMonitor.ts,
-│                        objectDetector.ts and robotEvents.ts are the hackathon's senses)
+│                        objectDetector.ts and robotEvents.ts are the hackathon's senses;
+│                        localBrain.ts is the face for the local brain)
 ├── notebooks/           Meet the Loop, plus training/ (the code used to train the tricks)
 ├── docs/                architecture notes and Peng Xu's write-up
-├── run_pupper.sh        one command: build if needed, start the kiosk, watch tool calls and events live
-└── tools/               hackathon dev tools: ./tools/pup and display examples
+├── run_pupper.sh        one command: the Mac's local models and link, or the Pi's brain and face
+├── run_thor.sh          on the Mac: the same, with Gemma on the team's Jetson Thor instead of the Mac
+└── tools/               hackathon dev tools: ./tools/pup, brain_on_mac.sh (the local brain on a Mac),
+                         thor_relay.py (the Thor's Gemma in Ollama's terms),
+                         brain_bench.py (which Gemma is the best brain), display examples
 ```
 
 Each file in `lab/` has two halves: first **what the robot does** (check the request, queue a
@@ -109,33 +112,39 @@ parameters). The Robot API (`robot.queue`, `robot.switch_to`, ...) is documented
 Clone this whole repo onto the Pupper and run the setup script from its root:
 
 ```bash
-git clone https://github.com/codergautam/pupper-hackathon-setup.git ~/pupper-hackathon-setup
-cd ~/pupper-hackathon-setup
+git clone https://github.com/codergautam/pupper-hackathon-setup.git ~/pupper-hackathon
+cd ~/pupper-hackathon
+# Check out the branch/revision you intend to test before setup.
 robot/setup.sh
 ```
 
-`setup.sh` installs Node in your home folder, builds the web app, checks the Python packages and
-asks for your Gemini API key (from [Google AI Studio](https://aistudio.google.com/apikey)). The
-key is saved in `~/.config/gemini-pupper/api_key`, never in this repo. It is safe to run again.
+`setup.sh` installs Node in your home folder, builds the web app and checks Python packages.
+It does not request a Gemini key. It is safe to run again; a failed build stops setup instead
+of accepting an old `web/dist/` as a successful rebuild.
 
 Keep `~/follow_me_pupper` (Lab 5) on the Pupper: follow mode runs it. The ROS 2 workspace that
 `start.sh` sources is `~/pupperv3-monorepo`.
 
-To update the Pupper later: `git pull` in `~/pupper-hackathon-setup` (or `./tools/pup sync` from a
-laptop), then restart.
+Update the intended branch in `~/pupper-hackathon` explicitly before a supervised run.
+Startup prints that checkout's revision and local changes; it does not pull or switch branches.
 
 ## Running
 
-On the Pupper, on the ground, with clear space around it, the quickest way is one command:
+**With the local brain (no cloud):** on the Mac, `./run_pupper.sh`; see
+[The local brain on a Mac](#the-local-brain-on-a-mac). With Gemma on the Thor
+instead: `./run_thor.sh`, see [Gemma on the Thor](#gemma-on-the-thor).
+
+Once the Mac's model services and SSH link are up, the Pi can run the same command.
+Only start with Pupper on the ground, clear space around it, and a person at the e-stop:
 
 ```bash
-./run_pupper.sh           # kiosk on Pupper's screen, volume 30
+./run_pupper.sh           # kiosk on Pupper's screen, volume 100
 ./run_pupper.sh 50        # speaker volume 0-100
 ./run_pupper.sh --laptop  # no kiosk: open the app from your laptop through the SSH tunnel
 ```
 
-It does every setup step for you: puts Node on the PATH, rebuilds the web app if a
-source file is newer than the build (or runs `robot/setup.sh` if there is no Node yet), installs
+It puts Node on the PATH, rebuilds the web app when its source content changes
+(or runs `robot/setup.sh` if there is no Node yet), installs
 missing Python packages, checks the mic (a warning, not a stop), sets the volume, prints who
 Pupper remembers, starts everything, prints things to try, and then shows every tool call, event
 (reminders, sound alerts, search results) and outcome live. Ctrl+C stops everything (`robot/stop.sh`).
@@ -143,16 +152,16 @@ Pupper remembers, starts everything, prints things to try, and then shows every 
 Or run the pieces yourself:
 
 ```bash
-robot/start.sh --kiosk    # robot + the app on Pupper's own screen (its mic and speaker)
+robot/start.sh --face     # robot + face only; does not start a brain (also: --kiosk)
 robot/start.sh            # robot only; open the app from your laptop (below)
 robot/stop.sh             # relax the motors and stop everything (also if Pupper overheats)
 ```
 
-Wait for `[3/3] ready`. From your laptop: `ssh -N -L 8000:localhost:8000 pi@pupper5.local`, open
-http://localhost:8000, open **Settings**, paste your key and press **WAKE PUPPER**. The debug view
-shows every tool call and its result.
+With `run_pupper.sh`, the face wakes when the Python brain publishes its heartbeat. There is no
+WAKE PUPPER button or Gemini session. The Mac's SSH link exposes the face and debug UI at
+http://localhost:8000. Starting `robot/start.sh` alone leaves the face waiting for a brain.
 
-The e-stop is the gamepad's right stick (press it): it relaxes the motors, whatever Gemini is
+The e-stop is the gamepad's right stick (press it): it relaxes the motors, whatever the model is
 doing.
 
 Things to try: "sit, and give me your paw", "other paw", "stand up", "be a spider, walk forward a
@@ -165,23 +174,24 @@ Debugging: `tail -f /tmp/gemini-pupper/server.log` (your `lab/` code) and
 ## Testing without the robot
 
 ```bash
-python3 -m pip install --user google-genai pyyaml
-python3 lab/test.py            # all 557 checks, on a fake robot: the lab's 258 (with the reminders), the hackathon's 232, then the local brain's 67
+python3 -m pip install --user pyyaml
+python3 lab/test.py            # all lab, hackathon and local-brain checks, on a fake robot
 python3 lab/test.py todo9      # one TODO
 python3 lab/test.py reminders  # the reminders (robot/test_reminders.py)
 python3 lab/test.py hackathon  # memory, screen, sound, vision, eyes, find (explore), guard, learning (or: hackathon explore)
 python3 lab/test.py brain      # the local brain with a fake Ollama: tools, fallbacks, the loop, the ears (or: brain voice)
+python3 lab/test.py brain thor # Gemma on the Thor: the real brain and relay, a fake vLLM
 python3 vision/test_eyes.py    # the depth sense on synthetic floors, chair legs, cables and walls (needs numpy)
-python3 lab/chat.py            # your prompt and tools, on a fake robot: nothing moves
-python3 lab/chat.py --show     # print every tool description as Gemini reads it, then chat
-python3 lab/chat.py --robot    # your tools on the real Pupper (robot server running): it moves!
+python3 robot/gemma_brain.py   # local Ollama, typed conversation, fake robot: nothing moves
+python3 robot/gemma_brain.py --show  # print the prompt and tool declarations, then chat
 ```
 
-`chat.py` needs a Gemini key in `GEMINI_API_KEY` or `~/.config/gemini-pupper/api_key`. In text
-mode it uses your real memory file (set `PUPPER_MEMORY_FILE` for a scratch one), fires due
-reminders when you press Enter, and shows the events Gemini gets.
+The text brain needs a running Ollama; use `--ollama URL --model NAME` to choose it. Text sessions
+use your real memory file (set `PUPPER_MEMORY_FILE` for a scratch one). The benchmark isolates
+memory automatically. The older `lab/chat.py` is a separate Gemini/cloud development client;
+it requires `google-genai` and a Gemini key and is not the local-brain launch path.
 
-### The whole app on your laptop (voice, face, reminders), with a fake robot
+### The face and server on your laptop, with a fake robot
 
 ```bash
 ./run_local.sh                 # then open http://localhost:8000
@@ -192,17 +202,15 @@ PORT=8080 ./run_local.sh       # if 8000 is taken
 This runs the real robot server, your `lab/` tools and prompt, the reminders and the web app on
 your laptop; only ROS is replaced by the fake robot from the tests, so **nothing moves**: every
 motion is printed instead (`[fake robot] legs: gemini_walk took over`, `[fake robot] walking
-vx=0.4 ...`). Open the page, go to **Settings**, paste your Gemini key, press **WAKE PUPPER**, and
-talk through your laptop's mic (allow mic and camera when Chrome asks). It builds the web app
+vx=0.4 ...`). This starts the server and UI, not a language model or a voice process. Use the
+typed brain above to test tasks separately. It builds the web app
 first if needed (needs Node.js), and needs `fastapi uvicorn psutil pydantic pyyaml`; on NixOS,
 without python3/npm, it reruns itself in a `nix-shell` that has them. Reminders made here go to
 `~/.config/gemini-pupper/reminders-laptop.json`, separate from the Pupper's.
 
 Testing reminders on the laptop:
 
-- **With Gemini:** say "remind me in one minute to drink water". About a minute later Pupper
-  says it, the banner shows, and the server prints `reminders INFO ... delivered (gemini)`.
-- **Without a key** (the app open, not connected): set one by hand, then after it is a minute
+- **With no brain** (the app open): set one by hand on this fake server, then after it is a minute
   overdue the browser says it with its own voice and shows the banner:
   `curl -X POST localhost:8000/tools/set_reminder -H 'content-type: application/json' -d '{"message":"drink water","in_minutes":0.25}'`
 - **With no app open:** the server says it with `espeak-ng` or `spd-say` after 90 s, if one is installed.
@@ -289,11 +297,21 @@ The Pupper must be logged into W&B (`wandb login`) with the account the runs are
 
 ```sh
 ssh pi@pupper5.local
+ssh pi@100.88.25.110          # from anywhere, over Tailscale (both on the tailnet)
 ```
 
 The laptop and the Pupper must be on the same network for `.local` (mDNS) to resolve. To skip the
 password from then on, set up key-based login once: `ssh-copy-id pi@pupper5.local` (or
 `./tools/pup setup`).
+
+## `tools/mic_monitor.py`: which mic is Pupper listening with?
+
+A small page, run on the Pupper (`python3 tools/mic_monitor.py`, port 8090; open
+`http://<pupper>:8090`, or `ssh -N -L 8090:localhost:8090 ...` then `http://localhost:8090`). It
+shows PipeWire's default input (what `arecord -D default`, so `robot/gemma_brain.py`, records
+from), every program recording right now (the brain shows up as `arecord`, the kiosk as
+Chromium), and a live level bar. It only reads the mic's loudness: nothing moves, no audio leaves
+the Pupper. Standard library only.
 
 ## `./tools/pup`: quick testing on the Pupper
 
@@ -333,10 +351,9 @@ log: a search reports back.
 **Memory** (`lab/hackathon_memory.py`). A small JSON file on the robot,
 `~/.config/gemini-pupper/memory.json` (or `$PUPPER_MEMORY_FILE`), never in the repo: one
 profile per person (facts, where their things were last seen), the active profile,
-learned routines, settings. The robot server appends "What you remember" to the prompt at
+settings. The robot server appends "What you remember" to the prompt at
 connect, so a new session starts knowing the person; during a session Gemini uses `remember`,
-`recall`, `forget` (`what='everything'` clears the person; the prompt makes Gemini ask first) and
-`switch_profile` ("I'm Devesh"). Reset, three ways: by voice, the **Memory** card in the app's
+`recall` and `switch_profile` ("I'm Devesh"). Reset, two ways: the **Memory** card in the app's
 debug view (switch person, reset this person, reset all), or on the robot:
 
 ```bash
@@ -360,9 +377,10 @@ green, blue, purple, white, black); reminders are a white card too, and a tap cl
 sound alerts take over the whole screen. The face blinks and changes emotion by itself (sleepy when
 not connected, listening, happy while talking, excited when a search finds something, surprised at
 a sound alert, sad on a fault). **Demo without a robot:** `cd web && npm run dev`, then open
-`https://localhost:5173/?demo` for a scripted loop of all of these (`web/services/demo.ts`; nothing
-moves, no Gemini). With **Captions** on (Settings, default on) everything Pupper says is also
-written on its face (Gemini Live's output transcription). With **Sound alerts** on
+`https://localhost:5173/?demo` (`web/services/demo.ts`): the face, awake, with no robot and no
+Gemini (nothing moves); it asks for the mic, and real sounds in the room perk the ears up. With
+**Captions** on (Settings, default on) everything Pupper says is also written on its face (Gemini
+Live's output transcription). With **Sound alerts** on
 (default on), the browser measures the mic (dB above a slowly adapting background; Pupper's own
 voice is ignored) and posts loud moments to `POST /alerts/sound`; the robot decides: alerts off
 (`sound_alerts(enabled=false)`, "stop listening"), under the sensitivity (`low`/`medium`/`high`
@@ -389,8 +407,8 @@ is. Two behaviors use it:
   (both sides blocked, no fresh depth sense, or still blocked after the turn) the walk stops early
   and tells Gemini, as does anything in the way of any other move. The camera can't see beside the
   robot, so 0.5 m is a guess at "past it". Turning in place and backing away are always fine. The prompt adds the soft version: look at the camera before walking forward.
-- *Finding things* is one tool, `find` (`lab/hackathon_explore.py`, below); `found_object(name,
-  where)` remembers where a thing is when Gemini sees it in the camera or a person says.
+- *Finding things* is one tool, `find` (`lab/hackathon_explore.py`, below). Where a thing was found
+  is remembered by `find` and `go_to` themselves.
 
 **The eyes service: depth, go_to, look** (`vision/eyes.py`, `lab/hackathon_eyes.py`). The detector
 above knows 80 classes and nothing about distance, so on its own it cannot see chair legs, cables or
@@ -471,7 +489,7 @@ Running it, from a laptop (one tunnel both ways: the frames come down, `/look` g
 
 ```bash
 python3 -m pip install -r vision/requirements.txt          # numpy, pillow, onnxruntime
-ollama pull gemma3:4b                                        # once; a vision model, on-device
+ollama pull gemma4:26b                                       # once; a vision model, on-device
 ssh -N -L 8000:localhost:8000 -R 8100:localhost:8100 pi@pupper5.local
 python3 vision/eyes.py --fetch-depth-model                   # first time: downloads the ~99 MB model
 python3 vision/eyes.py                                       # then: depth at 5 Hz, Gemma on demand
@@ -484,8 +502,9 @@ Ollama installed there or `--no-gemma`. Without the eyes service nothing changes
 stays out of the way, `go_to` falls back to the COCO detector, and `look` says it has no eyes.
 
 Speeds: depth takes about 60 ms a frame at 252 px on a laptop (Apple Silicon CPU), so 5 Hz is easy,
-and 320-350 ms on the Pi 5. `gemma3:4b` through Ollama takes 1.6 s for a yes/no question and 2.2 s
-for a box or a description.
+and 320-350 ms on the Pi 5. `gemma4:26b` through Ollama on an M4 Pro answers a yes/no question or
+gives a box in about 0.2 s (thinking off; with it on, its few tokens go to thinking and every answer
+comes back empty).
 
 To check the threshold on a new robot or room, grab a frame with
 `curl localhost:8000/camera/image -o frame.jpg` and run `python3 vision/eyes.py --image frame.jpg`:
@@ -515,7 +534,8 @@ itself (`run_pupper.sh` installs its packages the first time; log `/tmp/gemini-p
 `curl localhost:8100/health` shows it; `stop.sh` stops it; `PUPPER_EYES=off` skips it). With the
 whole stack up and busy the Pi 5 can reach 84 °C and throttle to 1.5 GHz, and a depth frame then
 takes about a second, so the Pi's eyes run at 1 Hz and 224 px (the smallest size that still finds a
-backpack on the floor; 196 does not) and are a fallback, not a sense to walk fast on. **For the
+backpack on the floor; 196 does not), on 2 of the 4 cores (all four competed with the motor loop
+and the robot server), and are a fallback, not a sense to walk fast on. **For the
 demo, run the eyes on a laptop** (5 Hz, the commands above) or on the Jetson; its posts take
 precedence. Every post carries its frame's age, so a slow poster can never make old data look
 fresh: the robot trusts a summary for 2.5 s from its frame, and stale means blind, never wrong.
@@ -591,28 +611,30 @@ within 0.2 m of a wall. It has not run on the robot yet. On the robot: clear flo
 watching with a hand near the e-stop, and start with `max_seconds=30` in a small space; the one
 hazard the depth sense cannot see is a drop (stairs, a stage edge).
 
-**Learning on the fly** (`lab/hackathon_learn.py`). `learn_routine(name)` starts recording;
-every motion tool Gemini calls after that is done for real and written down (accepted calls only;
-a refused move is not part of the trick); `finish_learning()` saves it (`save=false` discards);
-`do_routine(name)` replays it, each step through the same tool and the same checks, and stops at
-the first refused step and says so. Routines are in the memory file and in the prompt's memory
-section. The recorder is a `CALL_HOOKS` entry in `robot/tool_registry.py`, the one change to the
-provided registry besides the list of modules.
+**The ping** (`lab/hackathon_eyes.py`, `play_ping`). `go_to(what, ping=true)`, and `find` with
+`ping=true` (it passes it to the `go_to` that walks up to the thing), beep on arrival: three rounds
+of three rising chirps (900 to 1800 Hz, about 3.5 s), a WAV made once in the temp folder and played
+with `aplay` through PipeWire, like the brain's voice. Gemini only sets it when the person asks for
+a sound ("beep when you find it"). It plays inside the walking job, so the hearing alerts take it for
+Pupper's own noise (a beep would otherwise look like an alarm), and a stop cuts it short. With no
+speaker the walk still succeeds and the result says why there was no ping. Tested with a fake
+speaker (`python3 lab/test.py hackathon eyes explore`); check the volume on the robot once.
 
 **Calibrated hearing** (`hearing/`). When the robot server has it (numpy, scipy and
 sounddevice, all on the Pupper), sound alerts come from `hearing/listener.py` instead of the
 browser's measurement. It listens through PipeWire, next to the kiosk:
 
-- **Bangs and shouts:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
-  thresholds in dB above the room's noise floor.
-- **Sirens, alarms, doorbells, crashes, knocking and a baby crying:** Google's YAMNet
+- **Bangs:** the calibrated meter (`hearing/meter.py`, `hearing/detect.py`), with
+  thresholds in dB above the room's noise floor. It also detects shouts, but shouting is
+  not an alert (it is not in `URGENT` in `lab/hackathon_alerts.py`), so it shows nothing.
+- **Sirens, car horns, alarms, doorbells, crashes, knocking and a baby crying:** Google's YAMNet
   (`hearing/classify.py`, AudioSet's 521 classes through LiteRT, on-device, about 1.5 ms per
   0.5 s).
 
 What it hears goes to `lab/hackathon_alerts.py`:
 
 - **Urgent sounds** (a hardcoded list, `URGENT`) turn the screen red with what they were (SIREN,
-  DOORBELL, KNOCKING, BABY CRYING...) for 10 s.
+  CAR HORN, DOORBELL, KNOCKING, BABY CRYING...) for 10 s.
 - **Everyday sounds** show as a small label in the top-left corner (`GET /hearing/now`); silence
   shows nothing.
 - **Gemini is never told about sounds:** Pupper shows them, it doesn't talk about them.
@@ -641,13 +663,17 @@ walk can turn up to 90 degrees on its own to go round something, so keep clear s
 sides too. The detector's sense of "close" is from box size, not depth: it errs toward refusing. In a loud room, set
 `sound_alerts(sensitivity='low')` or untick Sound alerts.
 
-## The AI stack: where Gemini is, where Gemma is
+## The AI stack
+
+The local branch runs Gemma and Whisper on the Mac, the harness and Piper on the Pi, and the
+browser as a face. The following background also describes legacy Gemini/Jetson arrangements;
+use [the Mac instructions below](#the-local-brain-on-a-mac) for this branch's supported launcher.
 
 Two models, two jobs, and they are kept apart on purpose:
 
 | | Model | Runs | Talks to the robot through |
 | --- | --- | --- | --- |
-| **The brain**: hears, talks, decides, calls tools | Gemini Live (cloud API), or for the hackathon Gemma 4 + whisper + Piper (local) | the browser (`web/`); or `robot/gemma_brain.py` on the Pi, with Gemma and whisper on the Jetson | `GET /tools`, `POST /tools/<name>` |
+| **The brain**: hears, talks, decides, calls tools | Gemini Live (cloud API), or for the hackathon Gemma 4 + whisper + Piper (local) | the browser (`web/`); or `robot/gemma_brain.py` on the Pi, with Gemma and whisper on the Mac | `GET /tools`, `POST /tools/<name>` |
 | **The eyes**: depth, "where is X in the frame", "what is around" | Depth Anything V2 Small (ONNX) + Gemma 3 4B (Ollama) | `vision/eyes.py`, on a laptop today, the Jetson tomorrow | `POST /vision/*`, `GET /vision/wanted`, `/look` |
 | **The legs**: walking, tricks | the trained policies | ROS 2 on the Pi | `robot_api.py` |
 
@@ -664,97 +690,233 @@ The Jetson that arrives at the hackathon changes where things run, not how they 
 eyes service runs on a laptop on the same network (Ollama on the laptop, frames through the SSH
 tunnel), because the Pi 5's CPU cannot run Gemma at a useful speed. On the Jetson, mounted on the
 Pupper, the same `vision/eyes.py` runs with Ollama there (`--robot http://<pi>:8000`), and the whole
-eyes half is on-device. The brain moves too: `robot/gemma_brain.py` replaces Gemini Live with Gemma
-on the Jetson (plus whisper for speech to text and Piper for text to speech), see
-[The local brain](#the-local-brain-gemma-on-a-jetson-by-ethernet). One Gemma instance can serve both
-the brain and the eyes, since the eyes are a few calls a second at most.
+eyes half is on-device. The brain is local too: `robot/gemma_brain.py` replaces Gemini Live with
+Gemma on a Mac (plus whisper for speech to text and Piper for text to speech), see
+[The local brain on a Mac](#the-local-brain-on-a-mac). One Gemma instance serves both the brain and
+the eyes, since the eyes are a few calls a second at most.
 
-## The local brain: Gemma on a Jetson, by Ethernet
+## The local brain on a Mac
 
-The hackathon forbids the cloud, and Gemini Live is cloud. `robot/gemma_brain.py` is the brain
-without it: `lab/chat.py`'s loop with Gemma (in Ollama) instead of Gemini, plus ears and a voice. It
-reads the same prompt and tools (`GET /tools`), sends every call to the robot server
-(`POST /tools/<name>`) and gives Gemma the `{success, message}` word for word, so the `lab/` tools,
-the queue, the limits and the obstacle rules are exactly the ones Gemini drives.
-
-```
-  laptop ~~WiFi~~ Pi 5 (pupper5.local)                      Jetson (Thor or Orin Nano)
-                  robot/server.py :8000  (localhost only)    Ollama + Gemma 4   10.10.10.1:11434
-                  robot/gemma_brain.py   ==== Ethernet ====  whisper.cpp server 10.10.10.1:8080
-                  mic, speaker, Piper    10.10.10.2          (vision/eyes.py too, if you like)
-```
-
-The brain runs on the Pi, beside the mic and the speaker. Only the heavy parts are on the Jetson:
-Gemma, and whisper (speech to text, on its GPU). Both listen only on the cable. The robot server
-stays on the Pi's localhost, so nothing on any network can move the robot, and no audio has to cross
-the cable on the way back (Piper speaks on the Pi).
-
-**Which Jetson.** Use the Thor if you have the choice. The two run different Gemmas, and the
-difference is in how well they pick tools:
-
-| | Thor | Orin Nano (8 GB) |
-| --- | --- | --- |
-| Gemma | `gemma4:26b` (a mixture of experts: 4B active per token, so it is fast) | `gemma4:e2b-it-qat` (4.3 GB; `e4b` is 6.6 GB and doesn't fit beside whisper) |
-| Tool calling | good | weak: give it fewer tools (`--only`) |
-| whisper | `small.en` | `base.en` |
-| Where | on the table, on wall power, the cable to Pupper | can ride on Pupper, with its own battery (not Pupper's) |
-
-`gemma_brain.py` picks the biggest Gemma Ollama has, so the same code runs on either.
-
-**Wiring.** One Ethernet cable straight from the Pi's port to the Jetson's. No switch, and any
-cable works (both ends swap pairs by themselves). This is the port Lab 1 used for the laptop, so the
-laptop now reaches the Pi over WiFi (`ssh pi@pupper5.local`). `jetson/link.sh pi down` puts the Pi
-back to Lab 1's setup (DHCP on the cable, the laptop sharing its internet). The Jetson runs on its
-own power supply.
-
-**Setup, once** (each needs the internet for its downloads, over WiFi; after that, nothing goes out):
+The brain's heavy half (Gemma, whisper) runs on a Mac, the rest on the Pupper. One command:
 
 ```bash
-# on the Jetson, in a clone of this repo: the cable (10.10.10.1), Ollama + Gemma, whisper.cpp on the GPU
-jetson/setup.sh                 # or: jetson/setup.sh gemma4:e4b   (another model)
-# on the Pi: the cable (10.10.10.2), Piper and its voice, espeak-ng
-jetson/setup_pi.sh
-# on the Pi: is everything reachable, how fast is Gemma, can it call a tool?
-python3 robot/gemma_brain.py --check
-jetson/link.sh status           # on either end: the address, and a ping to the other end
+./run_pupper.sh          # on the Mac, or on the Pupper; ./run_pupper.sh 50 for the speaker's volume
 ```
 
-**Running.** Try it without the robot first, then in text on the robot, then by voice:
+```
+  Mac (Apple silicon)                                  Pupper (Pi 5)
+  Ollama + Gemma 4 26B     :11435   ~~ ssh link ~~>    localhost:11435, :8178
+  whisper.cpp (Metal)      :8178                       robot/server.py, gemma_brain.py, face, mic, speaker
+```
+
+The Pupper can't reach the Mac's servers by itself, so the Mac links them to it over ssh (Tailscale):
+an ssh connection, kept up in the background, that makes the two ports `localhost` on the Pupper.
+
+**On the Mac**, `./run_pupper.sh` (`tools/brain_on_mac.sh`):
+
+1. Finds the Pupper over ssh with the address saved in `~/.config/pupper/ssh` (`pi@host port`).
+   By default that's Tailscale, `pi@100.88.25.110`. When it stops working, it asks once for the ssh
+   command you use and saves it. It prints the branch, revision and local changes in
+   `~/pupper-hackathon` on the Pupper. Startup does not pull or switch code: update that checkout
+   explicitly before running.
+2. Starts the brain's servers on the Mac if they aren't up: an Ollama of its own on port 11437
+   (16k context, Gemma kept loaded; an Ollama app you already run is left alone, they share the
+   models) behind `tools/ollama_relay.py` on port 11435, and whisper.cpp's server on the GPU
+   (installed with Homebrew, with its `large-v3-turbo` model, the first time). All listen on the
+   Mac only.
+3. Starts the link and checks the Pupper sees both servers through it.
+4. Runs `./run_pupper.sh` on the Pupper (below). The eyes run there, on its camera.
+
+**The Pupper's WiFi sends slowly.** On a public hotspot it measured about 11 KB/s up (0.9 MB/s
+down), so what crosses the link is kept small. The brain gzips each request to Gemma (the prompt
+and 30 tools, ~32 KB, become ~10 KB; the relay unzips them), speech goes to whisper as Opus (3 s
+of speech: 103 KB as WAV, 10 KB as Opus; whisper-server `--convert` reads it), and the eyes stay
+on the Pupper, sending Gemma 512 px images. Over that link: a turn's request 1.5 s -> 0.5 s, 3 s
+of speech 5.8 s -> 1 s. The terminal prints how many KB each step sent.
+
+Ctrl+C stops the robot. The servers and the link keep running (until the Mac sleeps or restarts),
+so `./run_pupper.sh` on the Pupper works by itself afterwards. `tools/brain_on_mac.sh stop` ends them.
+
+**Hearing.** The Pupper decides you stopped talking with Silero VAD, a small speech detector
+(`~/.cache/pupper/silero_vad.onnx`, from `robot/setup_voice.sh`): by loudness alone, a noisy room
+never sounded quiet and whisper got 15 s of noise at a time. Each utterance is at most 8 s.
+whisper is `large-v3-turbo` (about 0.5 s a sentence on an M4 Pro), told Pupper's own words
+("stand up", "push-up") as a hint, in English, with non-speech sounds suppressed. What whisper
+says for noise rather than speech ("Thank you.", "Thanks for watching", "Ah.") is dropped when it is
+the whole utterance. Piper's voice is loaded once, not for every sentence.
+
+**Watching it on the Mac.** Everything heavy runs on the Mac's GPU, in short bursts (Gemma 4 26B
+uses 4B parameters per token), so the Mac may not get warm. While the link is up:
+
+- `http://localhost:8000`: Pupper's own app (its face, and the debug view).
+- `tail -f ~/.cache/pupper/logs/ollama.log`: a line for each Gemma request, with its time.
+- `OLLAMA_HOST=127.0.0.1:11435 ollama ps`: the model, loaded, at "100% GPU".
+- `tail -f ~/.cache/pupper/logs/whisper.log`: each utterance whisper heard, and its length.
+- Activity Monitor, Window, GPU History: the bursts as you talk.
+
+**On the Pupper**, `./run_pupper.sh` checks it can reach Gemma and whisper through the link
+(`gemma_brain.py --check --voice`; if not, it says to run `./run_pupper.sh` on the Mac and starts
+nothing), installs Piper the first time (`robot/setup_voice.sh`), starts the robot with the kiosk as
+the brain's face (`robot/start.sh --face`) and the eyes asking the Mac's Gemma, then runs the brain:
+Pupper's mic, whisper, Gemma, Piper, Pupper's speaker. There is no Gemini Live on this branch.
+
+**The face works as with Gemini.** The kiosk opens the app as the brain's face
+(`web/services/localBrain.ts`): no Gemini, no key, no WAKE PUPPER button. The brain posts what it
+is doing (`POST /brain/state`: listening, speaking, the caption), and the face shows it: awake
+while the brain runs, a moving mouth and captions while Pupper talks. The app's own jobs run as
+before: the screen's cards (`show_text`, sound alerts, found it), the sound monitor on the mic,
+and reminders. The browser's object detector does not run here: the eyes service runs the same
+model on the Pi and posts the same detections, and running both kept the Pi at 84 °C. The face
+redraws at 30 frames a second, not the display's 60 (`FACE_FPS` in `web/components/DogFace.tsx`). A due reminder's card shows on the
+face, and the app hands it to the brain to say (`POST /brain/announce`, an event the brain reads
+like any other). Without a face, the brain claims due reminders itself, a minute late.
+
+**Text on the screen only for a deaf person.** Pupper speaks. Captions, `show_text`, reminder and
+alert cards and the "what Pupper hears" label appear only when the person it is talking with is
+deaf or hard of hearing: a fact it remembers about them ("I'm deaf" -> `remember`;
+`needs_text()` in `lab/hackathon_memory.py`, reported in `GET /brain/state`). Otherwise
+`show_text` declines and Gemma says it instead.
+
+Ctrl+C stops the brain and the robot (`robot/stop.sh`); so does the ssh connection dropping. Run
+it with Pupper on the floor and a hand near the e-stop: it moves when you ask it to.
+
+Once per laptop: `./tools/pup setup` (the ssh key) and Ollama (`brew install ollama` or the app).
+
+**The model: `gemma4:26b`.** A mixture of experts with 4B parameters active per token, so it is
+fast for its size, and on a 48 GB M4 Pro it leaves room for whisper. It is the only model: the
+script pulls it the first time (about 17 GB, on a fast network). `tools/brain_bench.py` scores it
+on commands and conversations through the real prompt and tools, on the fake robot: on the M4 Pro,
+17/17 right, 17/17 clean (nothing extra that moves the robot), 0.5 s to reply (measured before the
+benchmark required action calls to be accepted; rerun before relying on it). The brain:
+
+- **keeps thinking off.** On, it made the same choices but took 3.4 s to reply. Off, its thought
+  sometimes leaks into a reply after a tool result ("thought ... I found your cup", before any
+  search had run); the brain drops it, so it is never said.
+- **warms up at start.** Gemma reads the whole prompt and tools (about 8k tokens, 10-15 s) before
+  anyone speaks, and that exchange stays as the start of the conversation: Ollama reuses a cached
+  prompt reliably only when the next request extends it, so the first turn takes half a second.
+  The history is trimmed by half when it gets long, so that 10 s re-read is rare.
+- **keeps memory out of the system prompt.** Ollama reads the system prompt before the tools, so
+  a memory section there changed the start of every request after `remember` or `switch_profile`
+  and Gemma re-read all ~8k tokens (12 s for "I'm Yash"). The brain takes "What you remember" off
+  the end of the prompt, opens the conversation with it, and adds a change to the end, in the
+  memory tool's result (`memory_now`): the next reply takes half a second.
+
+Things to know:
+
+- **The Mac's terminal** shows what Pupper hears, says and does, besides the face.
+- **Is a laptop "on-device"?** The model runs on the table in front of you, with no cloud. Check with
+  the organizers that this counts.
+
+**The brain by itself**, to try a model or a prompt change without the robot:
 
 ```bash
-python3 robot/gemma_brain.py                     # type; your tools on the fake robot: nothing moves
-robot/start.sh                                   # on the Pupper: the robot, no kiosk (see below)
-python3 robot/gemma_brain.py --robot             # type to the real robot: it moves!
-python3 robot/gemma_brain.py --robot --voice     # talk to it: it moves!
-python3 robot/gemma_brain.py --robot --voice --camera   # Gemma also sees the newest frame each turn
+python3 robot/gemma_brain.py              # on the Mac: type to Gemma (the Mac's Ollama), your tools on the fake robot
+python3 robot/gemma_brain.py --check      # is Ollama up, how fast is Gemma, can it call a tool?
 python3 robot/gemma_brain.py --only stand_up,lie_down,stop,move,turn,play_trick,set_reminder,show_text
 ```
 
-With `--robot`, Pupper is on the ground with a hand near the e-stop, as always. Start the robot
-**without the kiosk** (`robot/start.sh`, or `./run_pupper.sh --laptop`): the kiosk's web app would
-connect Gemini Live (a second brain, and cloud) and hold the mic. Saying just "stop" (or "Pupper,
-stop") stops the robot at once, without waiting for Gemma. The gamepad's e-stop works whatever the
-brain does.
-
-What it does that the web app did: robot events (reminders, sound alerts, search results) become
-turns, so Pupper speaks up by itself; due reminders are claimed and delivered (`/reminders/claim`);
-what was said goes to the session log (`POST /transcript`). How Gemma calls tools: natively
-(Ollama's tools); if it writes a call out as text instead, that still runs; and with a model or an
-Ollama that can't do tools at all, `--tools auto` switches to JSON replies (`{say, calls}`, held to a
-schema). Arguments like `"1.5"` for a number are fixed by the declaration; anything else wrong is
-refused by the robot, with the reason, as with Gemini.
+Saying just "stop" (or "Pupper, stop") stops the robot at once, without waiting for Gemma. The
+gamepad's e-stop works whatever the brain does. Robot events (reminders, sound alerts, search
+results) become turns, so Pupper speaks up by itself, and what was said goes to the session log
+(`POST /transcript`). How Gemma calls tools: natively (Ollama's tools); if it writes a call out as
+text instead, that still runs. Arguments like `"1.5"`
+for a number are fixed by the declaration; anything else wrong is refused by the robot, with the
+reason, as with Gemini.
 
 What it does not do yet, compared with Gemini Live:
 
 - **No interrupting.** The mic is off while Pupper talks (or it would hear itself), so "stop" isn't
   heard mid-sentence; the e-stop is.
-- **Slower turns**: the end of your sentence (0.8 s of quiet), whisper, then Gemma. `--check`
-  prints Gemma's times; the first call after a start loads the model (10-30 s).
-- **No captions on Pupper's screen**: they come from the web app. The terminal shows both sides.
-- **Not tried on a real Jetson yet.** The loop is tested against a fake Ollama
-  (`python3 lab/test.py brain`), and the setup scripts follow Ollama's and whisper.cpp's docs.
-  Run `--check` first, and expect to adjust `jetson/setup.sh` on the day (the Thor's JetPack 7
-  in particular).
+- **Slower turns**: the end of your sentence (0.7 s without speech), whisper (about 0.5 s), Gemma,
+  then Piper making the sound. The terminal prints each one's time, every turn.
+
+The local brain keeps incoming requests and robot events as separate turns. A spoken stop
+invalidates an in-flight model decision and discards older waiting requests, so a late reply
+cannot restart motion. This still requires the microphone to hear the stop; use the physical
+e-stop while Pupper is speaking. If a tool in a batch fails, later calls in that batch are
+reported as not run (except `stop`), and Gemma receives the results to reassess. Disabled tools,
+malformed argument objects and non-finite numbers are refused rather than becoming default actions.
+Speech accompanying a tool batch is held until its calls return and dropped if any call fails,
+so an optimistic preamble is not spoken for a refused action. Robot HTTP requests run off the
+conversation event loop so a slow request does not block stop handling or the face heartbeat.
+The brain waits up to 30 seconds for queued work after a batch, then receives the current queue
+and the last eight actual job outcomes (`robot_state` in tool feedback, also `GET /queue/status`).
+Long searches may still be running; a timeout never retries or cancels an action. A failed or
+crashed job stops the queued sequence and clears its dependent jobs. Controller and motion
+limits are unchanged. A robot event can request observations or screen updates, but cannot
+authorize new motion or other changes. The search behavior still handles its own requested approach.
+
+The harness refuses identical failed calls within a turn, limits a request to six model rounds
+and 24 tool calls, and allows one correction of malformed model protocol before reporting failure.
+It retains complete conversation turns rather than orphaned tool replies, prunes older turns
+against an approximate context-size budget, and refreshes memory context after memory changes.
+Check these behaviors without hardware with `python3 lab/test.py brain`, or run the complete
+fake-robot suite with `python3 lab/test.py`. These checks verify execution behavior; they do not
+measure whether a real Gemma model chooses the right task. Use `tools/brain_bench.py` against
+your running Ollama for that, without connecting to the robot.
+
+On the teammate's laptop, test the harness with the model already installed there. Neither
+command below uses the robot server or moves hardware (replace the model name and URL):
+
+```bash
+MODEL='your-installed-model-name'
+python3 tools/brain_bench.py --ollama http://localhost:11434 "$MODEL"
+python3 robot/gemma_brain.py --ollama http://localhost:11434 --model "$MODEL"
+```
+
+The benchmark includes refusals, requests not to act, and conversations such as sit → left paw →
+other paw and follow → stop following. Each case uses isolated temporary memory. Scores count
+accepted calls, not merely attempted calls; acceptance still does not prove a physical motion
+worked. Test these changes on the fake robot first. A physical run still requires someone at
+Pupper with a hand near the e-stop; changing code does not authorize starting the robot.
+
+## Gemma on the Thor
+
+**On the Pupper, no Mac:** put the Pupper on the Thor's WiFi (ThorNet) and run `./run_thor.sh` on
+the Pupper. It starts `tools/thor_relay.py` on the Pupper (port 11436, log
+`/tmp/gemini-pupper/thor_relay.log`), points the brain and the eyes at it, and runs
+`./run_pupper.sh`. Two things must be on the Thor first: vLLM with tool calling on (below), and
+speech to text, either whisper.cpp's `whisper-server -l en --convert --host 0.0.0.0 --port 8178` or
+`vllm serve openai/whisper-large-v3-turbo --port 8001` (the brain speaks both; `PUPPER_WHISPER=<url>`
+points elsewhere). Gemma 4 31B can't take audio itself. The script says which one is missing.
+
+The team's Jetson Thor (a GPU board) serves Gemma 4 31B with vLLM. `./run_thor.sh` on the Mac
+runs Pupper with that as its Gemma, for the brain and for the eyes' questions, in place of the
+Mac's Ollama. Everything else is as with `./run_pupper.sh`: whisper on the Mac, the ssh link, the
+Pupper's side unchanged.
+
+```bash
+./run_thor.sh                                    # finds the Thor on thornet (10.42.0.1), else LatentSpace (192.168.2.5)
+PUPPER_THOR=http://<address>:8000 ./run_thor.sh  # or say where it is
+python3 tools/thor_relay.py --thor http://10.42.0.1:8000 --check   # can the Thor talk and call a tool?
+./run_pupper.sh                                  # back to the Mac's Gemma (the relay is swapped back by itself)
+```
+
+How it works: the Pupper's brain and eyes speak Ollama's API, and the Thor speaks OpenAI's.
+`tools/thor_relay.py` stands on the Mac's port 11435, where `tools/ollama_relay.py` stands
+otherwise (the link makes it `localhost:11435` on the Pupper), and translates: the brain's chat with
+its tools and calls (each tool reply gets the id of its call), the eyes' prompts with a frame, JSON
+mode, gzipped requests. It lists `gemma4:26b` as well as the Thor's `gemma4-31b`, because the
+Pupper's code checks for that name; the Thor's model answers either way. `tail -f
+~/.cache/pupper/logs/relay.log` shows each request with its time and tokens.
+
+Before the first run, things to know:
+
+- **The Thor's vLLM needs tool calling on.** Started as in the setup, it refuses any request with
+  tools, and the brain sends 30 with every turn. Add `--enable-auto-tool-choice --tool-call-parser
+  gemma4` to the `vllm serve` line in `~/setup_endpoint.sh` on the Thor and rerun it.
+  `run_thor.sh` checks this first and says so if it's off.
+- **The Mac must reach both** the Thor and the Pupper. thornet has no internet, so Tailscale
+  (`pi@100.88.25.110`) may not work there. Put the Pupper on the Thor's network too, and give
+  `run_thor.sh` the Pupper's address there when it asks. whisper's model and Homebrew's
+  whisper.cpp must already be on the Mac: a first run downloads them.
+- **It is slower than the Mac.** Gemma 4 31B is dense (every parameter for every token), about
+  8 tokens/s on the Thor, where the Mac's `gemma4:26b` uses 4B per token and replies in about half
+  a second. A turn with a tool call is two replies, so expect several seconds. It may choose tools
+  better, but nothing has measured that yet. The eyes' questions share the same GPU.
+- **Not yet run against the real Thor**, only against a fake vLLM (`python3 lab/test.py brain thor`).
+  The eyes send images, which nobody has tried on the Thor's endpoint yet.
 
 ## Hackathon plan
 
@@ -773,10 +935,33 @@ Google Gemma Hardware Hackathon:
 - **Biggest change from Lab 6:** Lab 6 is driven by **Gemini Live, a cloud API**, which the
   hackathon forbids. We keep the Lab 6 architecture (tools, the job queue, policies, tricks) and
   replace Gemini Live with a **local Gemma** brain, plus local speech-to-text and text-to-speech:
-  `robot/gemma_brain.py` on the Pi, with Gemma and whisper on a Jetson by an Ethernet cable
-  ([The local brain](#the-local-brain-gemma-on-a-jetson-by-ethernet)). The features above are
+  `robot/gemma_brain.py` on the Pi, with Gemma and whisper on a Mac over ssh
+  ([The local brain on a Mac](#the-local-brain-on-a-mac)). The features above are
   already brain-agnostic: tools, events and endpoints on the robot; the object detector and the
   sound monitor already run on-device.
+
+  ```
+  {
+  "tagOwners": {
+    "tag:pupper": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["deveshaggarwal100@gmail.com"],
+      "dst": ["tag:pupper"],
+      "ip": ["tcp:22"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["deveshaggarwal100@gmail.com"],
+      "dst": ["tag:pupper"],
+      "users": ["pi"]
+    }
+  ]
+}
+```
 
 ## Safety
 

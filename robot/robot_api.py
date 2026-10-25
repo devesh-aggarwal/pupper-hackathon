@@ -227,6 +227,8 @@ class Robot:
         self.commands: asyncio.Queue = asyncio.Queue()
         self.current: asyncio.Task | None = None
         self.busy_until = 0.0  # monotonic time when the queued work should finish
+        self.outcomes: collections.deque[dict] = collections.deque(maxlen=8)
+        self.outcome_id = 0
         self.stops = 0  # how many times stop (or the e-stop) has run
         self.worker = asyncio.get_event_loop().create_task(self._run_queue())
         # The gamepad e-stop (right-stick press) relaxes the course's joystick
@@ -494,15 +496,25 @@ class Robot:
             name, job, then = await self.commands.get()
             self._running_job_then = then
             self.current = asyncio.create_task(job())
+            res = Result(False, "cancelled")
             try:
                 res = await self.current
+                if not res.ok:
+                    self.send_speed(0, 0, 0)
+                    cleared = await self.clear_queue()
+                    res = Result(False, f"{res.message}; {cleared.message}")
                 (log.info if res.ok else log.warning)("%s: %s", name, res.message)
             except asyncio.CancelledError:
                 self.send_speed(0, 0, 0)
                 log.info("%s: cancelled", name)
-            except Exception:
+            except Exception as e:
+                res = Result(False, f"{type(e).__name__}: {e}")
+                self.send_speed(0, 0, 0)
+                await self.clear_queue()
                 log.exception("%s failed", name)
             finally:
+                self.outcome_id += 1
+                self.outcomes.append({"id": self.outcome_id, "job": name, **res.as_dict()})
                 self.current = None
 
     async def queue(self, name: str, job: Job, seconds: float, *, then) -> Result:
@@ -537,6 +549,9 @@ class Robot:
             "running": self.current is not None,
             "seconds_left": round(max(0.0, self.busy_until - time.monotonic()), 1),
             "following": self.following,
+            "state": state_name(self.state_now),
+            "state_after_queue": state_name(self.state_after_queue),
+            "outcomes": list(self.outcomes),
         }
 
     async def wait(self, duration: float) -> Result:

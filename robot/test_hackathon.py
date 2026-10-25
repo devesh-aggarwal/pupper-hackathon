@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Desk tests for the hackathon features: memory, the screen and hearing, reminders,
-seeing things, and routines learned on the fly. No robot, no ROS, no Gemini needed.
+and seeing things. No robot, no ROS, no Gemini needed.
 
     python3 lab/test.py hackathon     # just these
     python3 lab/test.py               # the lab's 166 checks, then these
@@ -34,7 +34,6 @@ import fisheye_geom  # noqa: E402
 import hackathon_alerts as alerts  # noqa: E402
 import hackathon_explore as explore  # noqa: E402
 import hackathon_eyes as eyes  # noqa: E402
-import hackathon_learn as learn  # noqa: E402
 import hackathon_log as hlog  # noqa: E402
 import hackathon_memory as memory  # noqa: E402
 import hackathon_vision as vision  # noqa: E402
@@ -53,7 +52,6 @@ def fresh_memory() -> None:
     eyes.TARGET.update(time=0.0, name="", box=None)
     eyes.WANTED.update(name="", since=0.0)
     explore.EXPLORING.update(name="", since=0.0)
-    learn.LEARNING = None
 
 
 def project(x: float, y: float, z: float) -> tuple[float, float]:
@@ -116,7 +114,7 @@ async def memory_tests() -> None:
     check("... the same fact twice is kept once", res.ok and "already" in res.message, res.message)
     res = await call(rig, "remember", fact="x")
     check("... a one-letter 'fact' is refused with an example", not res.ok and "e.g." in res.message, res.message)
-    await call(rig, "found_object", name="keys", where="on the desk")
+    memory.remember_object("keys", "on the desk")
     res = await call(rig, "recall")
     check("recall says the facts and the things", res.ok and "tennis" in res.message and "keys on the desk" in res.message, res.message)
     check("where_is finds a thing by name", (memory.where_is("my keys") or "").startswith("on the desk"), str(memory.where_is("my keys")))
@@ -127,13 +125,6 @@ async def memory_tests() -> None:
     check("another person starts empty", res.ok and "nothing remembered" in res.message, res.message)
     check("... and recall lists the other people", "devesh_a" in (await call(rig, "recall")).message)
     await call(rig, "switch_profile", name="Devesh A.")
-    res = await call(rig, "forget", what="tennis")
-    check("forget by a word drops that fact", res.ok and "tennis" in res.message, res.message)
-    res = await call(rig, "forget", what="tennis")
-    check("... forgetting it again says there is nothing, and lists the facts", not res.ok and "nothing" in res.message, res.message)
-    res = await call(rig, "forget", what="everything")
-    check("forget everything clears the profile", res.ok and "forgot everything" in res.message and
-          memory.active_profile(memory.load())["objects"] == {}, res.message)
     res = memory.reset_memory("all")
     check("reset all leaves an empty memory", res.ok and memory.load()["profiles"] == {}, res.message)
     memory.MEMORY_FILE.write_text("{not json")
@@ -147,6 +138,11 @@ async def screen_tests() -> None:
     print("Hackathon B: the screen and events")
     fresh_memory()
     rig = Rig()
+    res = await call(rig, "show_text", text="DOORBELL", detail="14:02", color="red", seconds=5)
+    check("show_text for a hearing person: not shown, say it instead (the screen has text only for the deaf)",
+          not res.ok and "say it out loud" in res.message and alerts.display_state() is None and not memory.needs_text(), res.message)
+    await call(rig, "remember", fact="is deaf")
+    check("... remembering that the person is deaf turns screen text on", memory.needs_text())
     before = alerts.EVENTS.last_id
     res = await call(rig, "show_text", text="DOORBELL", detail="14:02", color="red", seconds=5)
     check("show_text is accepted", res.ok and "DOORBELL" in res.message, res.message)
@@ -215,17 +211,30 @@ async def sound_tests() -> None:
     check("a detected alarm turns the screen red with ALARM, and Gemini is not told",
           res.message.startswith("ALARM") and alerts.display_state()["text"] == "ALARM"
           and alerts.display_state()["color"] == alerts.COLORS["red"] and len(evs) == 1 and evs[0]["for_gemini"] == "", res.message)
-    for cls, words in (("siren", "SIREN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"), ("shout", "SHOUTING"),
-                       ("knock", "KNOCKING"), ("baby", "BABY CRYING")):
+    for cls, words in (("siren", "SIREN"), ("horn", "CAR HORN"), ("doorbell", "DOORBELL"), ("crash", "CRASH"),
+                       ("baby", "BABY CRYING")):
         alerts._last_sound_alert = 0.0
         alerts.hearing_detected(rig.ts, {"cls": cls, "score": 50.0, "info": {"label": "x", "confidence": 0.8}})
         check(f"a detected {cls} shows {words} in red", alerts.display_state()["text"] == words
               and alerts.display_state()["color"] == alerts.COLORS["red"], str(alerts.display_state()))
     alerts._last_sound_alert = 0.0
+    alerts.clear_display()
+    res = alerts.hearing_detected(rig.ts, {"cls": "knock", "score": 50.0})
+    check("knocking doesn't alert (the robot's own sounds kept making it)", "not an urgent sound" in res.message, res.message)
+    alerts._last_sound_alert = 0.0
+    alerts.brain_speaking(True)
+    res = alerts.hearing_detected(rig.ts, {"cls": "bang", "score": 50.0})
+    check("nothing alerts while Pupper is talking (its voice made LOUD BANGs)", "own voice" in res.message, res.message)
+    alerts.brain_speaking(False)
+    alerts._speaking_until = 0.0
+    alerts.clear_display()
+    res = alerts.hearing_detected(rig.ts, {"cls": "shout", "score": 50.0})
+    check("a shout doesn't alert (shouting is not on the urgent list)",
+          "not an urgent sound" in res.message and alerts.display_state() is None, res.message)
     alerts._last_sound_alert = 0.0
     alerts.hearing_detected(rig.ts, {"cls": "bang", "score": 50.0})
-    res = alerts.hearing_detected(rig.ts, {"cls": "knock", "score": 60.0, "info": {"label": "Knock", "confidence": 0.7}})
-    check("a knock right after the meter's LOUD BANG replaces it with KNOCKING", alerts.display_state()["text"] == "KNOCKING", res.message)
+    res = alerts.hearing_detected(rig.ts, {"cls": "doorbell", "score": 60.0, "info": {"label": "Doorbell", "confidence": 0.7}})
+    check("a doorbell right after the meter's LOUD BANG replaces it with DOORBELL", alerts.display_state()["text"] == "DOORBELL", res.message)
     res = alerts.hearing_detected(rig.ts, {"cls": "siren", "score": 80.0})
     check("... but another sound right after is still one alert at a time", "already" in res.message, res.message)
     alerts._last_sound_alert = 0.0
@@ -488,6 +497,43 @@ async def eyes_tests() -> None:
     check("... and the eyes service is no longer asked for it", eyes.WANTED["name"] == "")
     check("... ending in locomotion", rig.robot.controllers[LOCOMOTION_CONTROLLER] == "active")
 
+    # The ping: asked for, Pupper beeps on arrival so someone who can't see can follow the sound.
+    pings: list[float] = []
+
+    async def fake_ping() -> str:
+        pings.append(rig.clock.now)
+        return ""
+
+    real_ping, eyes.play_ping = eyes.play_ping, fake_ping
+    world = World(rig, "red mug", bearing_deg=0.0, distance_m=1.0)
+    start = len(rig.records)
+    res = await call(rig, "go_to", what="the red mug", ping=True)
+    world.close()
+    check("go_to(ping=true): the reply says it will ping there", res.ok and "ping" in res.message, res.message)
+    check("... it pings once, on arrival, and the result says so", len(pings) == 1
+          and any("reached the red mug" in o and "pinged" in o for o in rig.outcomes(start)), f"{pings} {rig.outcomes(start)}")
+    pings.clear()
+    world = World(rig, "red mug", bearing_deg=0.0, distance_m=1.0)
+    await call(rig, "go_to", what="the red mug")
+    world.close()
+    check("... without ping, no sound", pings == [], str(pings))
+
+    async def no_speaker() -> str:
+        return "no speaker to ping with (aplay missing)"
+
+    eyes.play_ping = no_speaker
+    world = World(rig, "red mug", bearing_deg=0.0, distance_m=1.0)
+    start = len(rig.records)
+    await call(rig, "go_to", what="the red mug", ping=True)
+    world.close()
+    check("... no speaker: still reached, and the result says why it didn't ping",
+          any("reached the red mug" in o and "couldn't ping: no speaker" in o for o in rig.outcomes(start)), str(rig.outcomes(start)))
+    eyes.play_ping = real_ping
+    import wave
+    with wave.open(str(eyes.ping_wav())) as w:
+        secs = w.getnframes() / w.getframerate()
+    check("the ping is a real WAV of a few seconds (made once, in the temp folder)", 2.5 <= secs <= 5.0, f"{secs:.2f} s")
+
     world = World(rig, "ball", bearing_deg=0.0, distance_m=1.0)
     start = len(rig.records)
     await call(rig, "go_to", what="ball")
@@ -737,6 +783,20 @@ async def explore_tests() -> None:
     res = await call(rig, "find", what="a chair", max_seconds=1000)
     check("a search over the time limit is refused with the limit", not res.ok and "300" in res.message, res.message)
 
+    # The same search again before it ends (a model may call find twice in one turn): one search,
+    # not two. A stop drops it, and then the same search can start again.
+    first = await tools.call(rig.ts, "find", {"what": "the red mug", "max_seconds": 10})
+    second = await tools.call(rig.ts, "find", {"what": "my red mug", "max_seconds": 10})
+    pending = rig.ts.status()
+    check("find again while that search is pending: 'already looking', nothing more queued",
+          first.ok and second.ok and "already looking for the red mug" in second.message
+          and pending["queued"] + pending["running"] <= 1, f"{second.message} {pending}")
+    await tools.call(rig.ts, "stop", {})
+    await rig.settle()
+    third = await tools.call(rig.ts, "find", {"what": "the red mug", "max_seconds": 10})
+    check("... after a stop, the same search starts again", third.ok and "already" not in third.message, third.message)
+    await rig.settle()
+
     # In view already: found right away, and a go_to follows.
     depth()
     see(("cup", box(0.8, 0.2, 0.3, 0.9)))
@@ -791,7 +851,15 @@ async def explore_tests() -> None:
     depth()
     room = Room(rig, 6.0, 5.0, 4.5, 2.5, 0.0, {"chair": (1.0, 2.5)})  # the chair is 3.5 m behind the robot
     before, start, t0 = alerts.EVENTS.last_id, len(rig.records), rig.clock.now
-    res = await call(rig, "find", what="a chair", max_seconds=120)
+    pings = []
+
+    async def fake_ping() -> str:
+        pings.append(rig.clock.now)
+        return ""
+
+    real_ping, eyes.play_ping = eyes.play_ping, fake_ping
+    res = await call(rig, "find", what="a chair", max_seconds=120, ping=True)
+    eyes.play_ping = real_ping
     room.close()
     check("find a chair behind the robot: accepted, says what it will do", res.ok and "Finding" in res.message
           and "queued" in res.message and "walk up to it" in res.message, res.message)
@@ -805,6 +873,8 @@ async def explore_tests() -> None:
     check("... Gemini hears it was found, and that Pupper is walking up to it", any(e["kind"] == "found" and "found the chair" in e["for_gemini"]
           and "walking up to it" in e["for_gemini"] for e in evs), str([e["for_gemini"][:80] for e in evs]))
     check("... then a go_to to it ran and reached it", any("reached the chair" in o for o in outcomes), str(outcomes))
+    check("... and pinged once it got there (find(ping=true) passes it to the go_to)", len(pings) == 1
+          and any("reached the chair" in o and "pinged" in o for o in outcomes), f"{pings} {outcomes}")
     check("... and the chair is remembered (by the roam, then by the walk to it)", memory.where_is("chair") is not None, str(memory.where_is("chair")))
     check("... ending in locomotion with nothing wanted", rig.robot.controllers[LOCOMOTION_CONTROLLER] == "active"
           and explore.EXPLORING["name"] == "" and eyes.WANTED["name"] == "")
@@ -970,71 +1040,17 @@ async def guard_tests() -> None:
     rig.close()
 
 
-# ----------------------------------------------------------------------------- learning
-async def learn_tests() -> None:
-    print("Hackathon E: learning routines on the fly")
-    fresh_memory()
-    rig = Rig()
-    res = await call(rig, "do_routine", name="happy dance")
-    check("an unknown routine is refused, and the known ones are listed", not res.ok and "unknown routine" in res.message, res.message)
-    res = await call(rig, "learn_routine", name="Happy Dance!")
-    check("learn_routine starts recording", res.ok and "learning 'happy_dance'" in res.message, res.message)
-    res = await call(rig, "learn_routine", name="other")
-    check("... a second one at the same time is refused", not res.ok and "already learning" in res.message, res.message)
-    await call(rig, "play_trick", name="bow")
-    await call(rig, "turn", direction="left", angle=180)
-    await call(rig, "move", direction="forward", speed=9.0)  # refused: too fast
-    await call(rig, "recall")  # not a motion
-    await call(rig, "show_text", text="HI")
-    check("accepted motions are recorded, refused ones and non-motions are not",
-          [s["tool"] for s in learn.LEARNING["steps"]] == ["play_trick", "turn"], str(learn.LEARNING))
-    res = await call(rig, "finish_learning")
-    check("finish_learning saves it and says the steps", res.ok and "learned 'happy_dance'" in res.message and "then" in res.message, res.message)
-    check("... in memory", "happy_dance" in memory.load()["routines"])
-    check("... and the prompt section names it", "happy_dance" in memory.memory_prompt())
-    n_switch = len(rig.robot.switches)
-    res = await call(rig, "do_routine", name="happy dance")
-    check("do_routine replays both steps through their tools", res.ok and "2 steps queued" in res.message, res.message)
-    check("... the trick's controller took the legs again", any("trick_bow" in on for _, _, on in rig.robot.switches[n_switch:]))
-    check("... and it turned 180 degrees left", len([m for m in turns(rig) if m.angular.z > 0]) >= 3 * 20)
-    res = await call(rig, "learn_routine", name="nothing")
-    res = await call(rig, "finish_learning")
-    check("finishing with no steps is refused", not res.ok and "nothing recorded" in res.message, res.message)
-    await call(rig, "learn_routine", name="scrap")
-    await call(rig, "turn", direction="right")
-    res = await call(rig, "finish_learning", save=False)
-    check("finish_learning(save=false) throws it away", res.ok and "threw away" in res.message and "scrap" not in memory.load()["routines"], res.message)
-    res = await call(rig, "list_routines")
-    check("list_routines names it with its steps", res.ok and "happy_dance" in res.message and "play_trick" in res.message, res.message)
-    see(("person", box(0.5, 0.6, 0.8)))  # someone right in front: the routine's walk would be refused
-    await call(rig, "learn_routine", name="walkabout")
-    vision.VISION.update(time=0.0, detections=[])
-    await call(rig, "move", direction="forward", duration=1.0)
-    await call(rig, "play_trick", name="bow")
-    await call(rig, "finish_learning")
-    see(("person", box(0.5, 0.6, 0.8)))
-    res = await call(rig, "do_routine", name="walkabout")
-    check("a replayed step that is refused now (someone in the way) stops the routine and says where",
-          not res.ok and "stopped at step 1" in res.message and "blocked" in res.message, res.message)
-    vision.VISION.update(time=0.0, detections=[])
-    res = await call(rig, "forget_routine", name="walkabout")
-    check("forget_routine", res.ok and "walkabout" not in memory.load()["routines"], res.message)
-    check("the recorder is a registry hook", learn.record in tools.CALL_HOOKS)
-    rig.close()
-
 
 # ----------------------------------------------------------------------------- what Gemini reads
 async def declaration_tests() -> None:
     print("Hackathon: what Gemini reads")
     rig = Rig()
-    new_tools = ["remember", "recall", "forget", "switch_profile", "show_text", "sound_alerts", "set_reminder",
-                 "list_reminders", "cancel_reminder", "found_object",
-                 "learn_routine", "finish_learning", "do_routine", "list_routines", "forget_routine",
-                 "go_to", "look", "what_is_around", "find"]
+    new_tools = ["remember", "recall", "switch_profile", "show_text", "sound_alerts", "set_reminder",
+                 "list_reminders", "cancel_reminder", "go_to", "look", "what_is_around", "find"]
     tt.described(rig, new_tools, "hackathon")
     decls = {d["name"]: d for d in tools.declarations(rig.ts)}
     check("the hackathon tools come after the lab's", list(decls).index("remember") > list(decls).index("interactive_action"))
-    for heading in ("Memory", "Reminders", "Hearing and the screen", "Finding things and not bumping into them", "Learning new tricks",
+    for heading in ("Memory", "Reminders", "Hearing and the screen", "Finding things and not bumping into them",
                     "Seeing with your own eyes (depth and Gemma)"):
         text = tt.prompt_sections(heading)
         check(f"prompt.md has a '{heading}' section with 30+ words", len(text.split()) >= 30, f"{len(text.split())} words")
@@ -1045,7 +1061,7 @@ async def declaration_tests() -> None:
 
 GROUPS = {
     "memory": memory_tests, "screen": screen_tests, "sound": sound_tests,
-    "vision": vision_tests, "eyes": eyes_tests, "explore": explore_tests, "guard": guard_tests, "learn": learn_tests,
+    "vision": vision_tests, "eyes": eyes_tests, "explore": explore_tests, "guard": guard_tests,
     "declarations": declaration_tests,
 }
 

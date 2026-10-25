@@ -8,6 +8,7 @@
     python3 lab/test.py hackathon  # memory, screen, hearing, reminders, vision, learning
     python3 lab/test.py hackathon vision     # one hackathon group (memory, screen, sound, reminders, vision, eyes, learn, declarations)
     python3 lab/test.py brain      # the local Gemma brain (robot/gemma_brain.py), with a fake Ollama
+    python3 lab/test.py brain thor # Gemma on the Thor (tools/thor_relay.py), with a fake vLLM
 
 The lab's tests are in robot/test_tools.py, the hackathon's in robot/test_hackathon.py,
 the local brain's in robot/test_gemma_brain.py.
@@ -32,6 +33,8 @@ def run(script: str, *args: str) -> int:
 args = sys.argv[1:]
 if args[:1] == ["hackathon"]:
     sys.exit(run("test_hackathon.py", *args[1:]))
+if args[:2] == ["brain", "thor"]:
+    sys.exit(run("test_thor_relay.py", *args[2:]))
 if args[:1] == ["brain"]:
     sys.exit(run("test_gemma_brain.py", *args[1:]))
 if args:
@@ -41,4 +44,6 @@ print("=" * 60)
 hack = run("test_hackathon.py")
 print("=" * 60)
 brain = run("test_gemma_brain.py")
-sys.exit(lab or hack or brain)
+print("=" * 60)
+thor = run("test_thor_relay.py")
+sys.exit(lab or hack or brain or thor)

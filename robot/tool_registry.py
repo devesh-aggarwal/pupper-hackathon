@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 import sys
 import types
 from dataclasses import dataclass
@@ -61,14 +62,14 @@ LAB_DIR = Path(__file__).resolve().parent.parent / "lab"
 LAB_MODULES = [
     "basics", "part2_walk", "part3_follow", "part4_tricks", "part5_interactive_action",
     # Hackathon additions (README, "Hackathon features"): memory, the screen and hearing,
-    # reminders, seeing things, and learning routines on the fly.
-    "hackathon_memory", "hackathon_alerts", "hackathon_vision", "hackathon_learn",
+    # reminders, and seeing things.
+    "hackathon_memory", "hackathon_alerts", "hackathon_vision",
     "reminders",  # set_reminder, list_reminders, dismiss_reminder, cancel_reminder (robot/reminder_store.py keeps them)
     "hackathon_eyes",  # go_to, look, what_is_around (the eyes service, vision/eyes.py)
     "hackathon_explore",  # explore: roam to find a thing
     "hackathon_log",  # the session transcript and frames (no tools; the server records into it)
 ]
-# Run after every tool call with (name, args, result); hackathon_learn records routines this way.
+# Run after every tool call with (name, args, result); hackathon_vision's follow guard watches this way.
 CALL_HOOKS: list[Callable[[str, dict, Result], None]] = []
 
 
@@ -161,7 +162,9 @@ async def call(robot: Robot, name: str, args: dict) -> Result:
     t = TOOLS.get(name)
     if t is None:
         return Result(False, f"unknown tool {name}; the tools are {sorted(TOOLS)}")
-    args = dict(args or {})
+    if not isinstance(args, dict):
+        return Result(False, f"{name}: arguments must be an object")
+    args = dict(args)
     extra = sorted(set(args) - set(t.params))
     if extra:
         return Result(False, f"{name} has no parameter {extra}; it takes {sorted(t.params)}")
@@ -173,6 +176,8 @@ async def call(robot: Robot, name: str, args: dict) -> Result:
         v = args[pname]
         if isinstance(v, bool) and p.type != "boolean" or not isinstance(v, _TYPES[p.type]):
             return Result(False, f"{name}: {pname} must be a {p.type}, not {v!r}")
+        if isinstance(v, float) and not math.isfinite(v):
+            return Result(False, f"{name}: {pname} must be finite, not {v!r}")
         enum = _resolve(p.enum, robot)
         if enum is not None and not enum:
             return Result(False, f"{name}: nothing is installed for {pname} yet, so it can't be used")

@@ -2,17 +2,16 @@
 # One-time setup of Gemini Pupper on the robot. Safe to run again (e.g. after a git pull
 # or after editing the web app: it rebuilds web/dist/).
 #   robot/setup.sh    Node in ~/.local/node (no sudo), the web app build, the robot
-#                     server's Python packages, and the Gemini API key file
-# Then start with robot/start.sh --kiosk.
+#                     server's Python packages. No cloud key is needed on this branch.
+# Then start with ./run_pupper.sh (the Mac brain must be reachable).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(dirname "$HERE")
 NODE_VERSION=v22.23.3  # Debian's nodejs (18) is too old for the build tools
 NODE_DIR=$HOME/.local/node
-KEY_FILE=${GEMINI_KEY_FILE:-$HOME/.config/gemini-pupper/api_key}
 
 node_major() { "$NODE_DIR/bin/node" -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
 
-echo "[1/4] Node.js"
+echo "[1/3] Node.js"
 if [ "$(node_major || echo 0)" -ge 20 ] 2>/dev/null; then
   echo "      $("$NODE_DIR/bin/node" -v) already in $NODE_DIR"
 else
@@ -29,35 +28,20 @@ if ! grep -qs '.local/node/bin' "$HOME/.bashrc"; then
   echo "      added Node to PATH in ~/.bashrc (open a new terminal to use npm yourself)"
 fi
 
-echo "[2/4] building the web app (npm ci && npm run build)"
+echo "[2/3] building the web app (npm ci && npm run build)"
 cd "$REPO/web"
-if grep -qs '^GEMINI_API_KEY=..' .env.local; then
-  echo "      note: .env.local has a GEMINI_API_KEY, so the build embeds it in web/dist/. Never share it."
-fi
 npm ci --no-audit --no-fund --loglevel=error
-npm run build --silent 2>&1 | grep -vE "chunks are larger|dynamic import|manualChunks|chunkSizeWarningLimit|^$" || true
+npm run build --silent
 [ -f dist/index.html ] || { echo "build failed: no dist/index.html"; exit 1; }
 echo "      built web/dist/"
 
-echo "[3/4] Python packages for the robot server"
-if python3 -c "import fastapi, uvicorn, psutil, pydantic, websockets, google.genai" 2>/dev/null; then
+echo "[3/3] Python packages for the robot server"
+if python3 -c "import fastapi, uvicorn, psutil, pydantic, websockets, yaml" 2>/dev/null; then
   echo "      already installed"
 else
-  python3 -m pip install --user --break-system-packages -q fastapi uvicorn psutil pydantic websockets google-genai
-  python3 -c "import fastapi, uvicorn, psutil, pydantic, websockets, google.genai"
+  python3 -m pip install --user --break-system-packages -q fastapi uvicorn psutil pydantic websockets pyyaml
+  python3 -c "import fastapi, uvicorn, psutil, pydantic, websockets, yaml"
   echo "      installed"
 fi
 
-echo "[4/4] Gemini API key ($KEY_FILE)"
-if [ -s "$KEY_FILE" ]; then
-  echo "      already there"
-elif [ -t 0 ]; then
-  read -rsp "      paste your Gemini API key (hidden), then Enter: " key; echo
-  [ -n "$key" ] || { echo "      no key given; kiosk mode needs it. Run setup again later."; exit 0; }
-  mkdir -p "$(dirname "$KEY_FILE")"; (umask 077; printf '%s\n' "$key" > "$KEY_FILE")
-  echo "      saved (readable only by you)"
-else
-  echo "      missing. Create it with:  mkdir -p $(dirname "$KEY_FILE") && (umask 077; cat > $KEY_FILE)"
-fi
-
-echo "done. Start with:  robot/start.sh --kiosk     (stop with robot/stop.sh)"
+echo "done. No Gemini API key is needed. Start with ./run_pupper.sh after the Mac brain is linked."
